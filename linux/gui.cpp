@@ -207,7 +207,7 @@ public:
         addProfile->setObjectName(QStringLiteral("addProfile")); profiles->addWidget(addProfile);
         layout->addWidget(profileEditor_);profileEditor_->hide();
         auto* body=new QHBoxLayout;body->setSpacing(24);layout->addLayout(body,1);
-        auto* navigationWidget=new QWidget;auto* navigation=new QVBoxLayout(navigationWidget);navigation->setSpacing(12);navigation->addStretch();body->addWidget(navigationWidget);
+        auto* navigationWidget=new QWidget;navigation_=navigationWidget;auto* navigation=new QVBoxLayout(navigationWidget);navigation->setSpacing(12);navigation->addStretch();body->addWidget(navigationWidget);
         auto* tabs = new QTabWidget(central);
         tabs->setObjectName(QStringLiteral("pages"));
         tabs->tabBar()->hide();pages_=tabs;
@@ -246,7 +246,8 @@ public:
         navigation->addStretch();
         connect(tabs,&QTabWidget::currentChanged,this,[this,navGroup,navigationWidget,heading](int index){
             if(auto* button=navGroup->button(index))button->setChecked(true);
-            navigationWidget->setVisible(index!=8 && index!=2 && index!=3);
+            const bool editing=(index==0 && pointerCanvas_->selectedIndex()>=0)||(index==1 && buttonCanvas_->selectedIndex()>=0);
+            navigationWidget->setVisible(index!=8 && index!=2 && index!=3 && !editing);
             heading->setText(index==8?QString::fromLatin1(title):index==2?QStringLiteral("Smart Actions"):index==3?QStringLiteral("Actions Ring"):QStringLiteral("MX Master 3S"));
             profileEditor_->hide();rebuildProfiles();
         });
@@ -443,7 +444,7 @@ private:
         auto* drawer=new QWidget;drawer->setObjectName("drawer");drawer->setFixedWidth(352);body->addWidget(drawer);
         auto* layout = new QVBoxLayout(drawer);layout->setContentsMargins(24,28,24,28);
         auto* top=new QHBoxLayout;auto* title=new QLabel(QStringLiteral("滚轮"));title->setStyleSheet("font-size:24px;font-weight:600;");top->addWidget(title);top->addStretch();
-        auto* close=new QPushButton(QStringLiteral("×"));close->setAccessibleName(QStringLiteral("关闭侧栏"));close->setFixedSize(36,36);top->addWidget(close);layout->addLayout(top);
+        auto* close=new QPushButton(QStringLiteral("×"));close->setObjectName("closePointerDrawer");close->setAccessibleName(QStringLiteral("关闭侧栏"));close->setFixedSize(36,36);top->addWidget(close);layout->addLayout(top);
         auto* group = new QGroupBox(drawer);group->setStyleSheet("QGroupBox{border:0;margin:0;padding:8px 0;}");
         auto* form = new QFormLayout(group);
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);form->setRowWrapPolicy(QFormLayout::WrapAllRows);form->setVerticalSpacing(20);
@@ -492,9 +493,9 @@ private:
             pointerCanvas_->setSelected(index);title->setText(QStringList{QStringLiteral("滚轮"),QStringLiteral("指针速度"),QStringLiteral("拇指滚轮")}[index]);
             form->setRowVisible(dpiRow,index==1);form->setRowVisible(smartShift_,index==0);
             for(auto it=checks_.cbegin();it!=checks_.cend();++it)form->setRowVisible(it.value(),it.key()=="thumb-invert"?index==2:index==0);
-            drawer->show();
+            navigation_->hide();drawer->show();
         };
-        connect(close,&QPushButton::clicked,this,[this,drawer]{drawer->hide();pointerCanvas_->setSelected(-1);});drawer->hide();
+        connect(close,&QPushButton::clicked,this,[this,drawer]{drawer->hide();pointerCanvas_->setSelected(-1);navigation_->show();});drawer->hide();
         return page;
     }
 
@@ -504,7 +505,7 @@ private:
         auto* drawer=new QWidget;drawer->setObjectName("drawer");drawer->setFixedWidth(352);body->addWidget(drawer);
         auto* drawerLayout=new QVBoxLayout(drawer);drawerLayout->setContentsMargins(24,28,24,28);
         auto* top=new QHBoxLayout;auto* title=new QLabel;title->setStyleSheet("font-size:24px;font-weight:600;");top->addWidget(title);top->addStretch();
-        auto* close=new QPushButton(QStringLiteral("×"));close->setAccessibleName(QStringLiteral("关闭侧栏"));close->setFixedSize(36,36);top->addWidget(close);drawerLayout->addLayout(top);
+        auto* close=new QPushButton(QStringLiteral("×"));close->setObjectName("closeButtonDrawer");close->setAccessibleName(QStringLiteral("关闭侧栏"));close->setFixedSize(36,36);top->addWidget(close);drawerLayout->addLayout(top);
         auto* scroll = new QScrollArea;
         scroll->setWidgetResizable(true);scroll->setFrameShape(QFrame::NoFrame);drawerLayout->addWidget(scroll);
         auto* page = new QWidget;
@@ -516,26 +517,33 @@ private:
             QStringLiteral("Ctrl+Alt+Right"), QStringLiteral("VolumeDown"), QStringLiteral("VolumeUp"),
             QStringLiteral("Mute"), QStringLiteral("PlayPause"), QStringLiteral("Ctrl+Tab"), QStringLiteral("Ctrl+Shift+Tab")};
         const QList<QPair<QString, QString>> controls{
-            {QStringLiteral("0052"), QStringLiteral("Middle button")},
-            {QStringLiteral("0053"), QStringLiteral("Back button")},
-            {QStringLiteral("0056"), QStringLiteral("Forward button")},
-            {QStringLiteral("00C4"), QStringLiteral("Top button")},
-            {QStringLiteral("00C3"), QStringLiteral("Gesture button · click")},
-            {QStringLiteral("00C3.left"), QStringLiteral("Gesture · left")},
-            {QStringLiteral("00C3.right"), QStringLiteral("Gesture · right")},
-            {QStringLiteral("00C3.up"), QStringLiteral("Gesture · up")},
-            {QStringLiteral("00C3.down"), QStringLiteral("Gesture · down")},
-            {QStringLiteral("thumb.left"), QStringLiteral("Thumb wheel · left")},
-            {QStringLiteral("thumb.right"), QStringLiteral("Thumb wheel · right")}};
+            {QStringLiteral("0052"), QStringLiteral("按下滚轮")},
+            {QStringLiteral("0053"), QStringLiteral("后退按钮")},
+            {QStringLiteral("0056"), QStringLiteral("前进按钮")},
+            {QStringLiteral("00C4"), QStringLiteral("顶部按钮")},
+            {QStringLiteral("00C3"), QStringLiteral("单击")},
+            {QStringLiteral("00C3.left"), QStringLiteral("按住并向左移动")},
+            {QStringLiteral("00C3.right"), QStringLiteral("按住并向右移动")},
+            {QStringLiteral("00C3.up"), QStringLiteral("按住并向上移动")},
+            {QStringLiteral("00C3.down"), QStringLiteral("按住并向下移动")},
+            {QStringLiteral("thumb.left"), QStringLiteral("向左滚动")},
+            {QStringLiteral("thumb.right"), QStringLiteral("向右滚动")}};
         for (const auto& pair : controls) {
             auto* choice = new QComboBox(page);
             choice->setEditable(true);
             choice->setObjectName(QStringLiteral("binding_") + pair.first.toLower());
-            choice->addItems(suggestions);
+            const QMap<QString,QString> actionNames{{"MouseMiddle",QStringLiteral("中键")},{"MouseBack",QStringLiteral("后退")},
+                {"MouseForward",QStringLiteral("前进")},{"WheelMode",QStringLiteral("切换滚轮模式")},{"Super+Tab",QStringLiteral("任务视图")},
+                {"Super+D",QStringLiteral("显示桌面")},{"Super",QStringLiteral("应用概览")},{"Ctrl+Alt+Left",QStringLiteral("上一个桌面")},
+                {"Ctrl+Alt+Right",QStringLiteral("下一个桌面")},{"VolumeDown",QStringLiteral("降低音量")},{"VolumeUp",QStringLiteral("提高音量")},
+                {"Mute",QStringLiteral("静音")},{"PlayPause",QStringLiteral("播放 / 暂停")},{"Ctrl+Tab",QStringLiteral("下一个标签页")},
+                {"Ctrl+Shift+Tab",QStringLiteral("上一个标签页")}};
+            for(const auto& action:suggestions)choice->addItem(actionNames.value(action,action),action);
             bindings_.insert(pair.first.toLower(), choice);
             form->addRow(pair.second, choice);
-            connect(choice, &QComboBox::currentTextChanged, this, [this, key = pair.first](const QString& value) {
+            connect(choice, &QComboBox::currentTextChanged, this, [this, choice, key = pair.first](const QString& text) {
                 if (loading_) return;
+                const auto value=choice->currentIndex()>=0 && text==choice->itemText(choice->currentIndex())?choice->currentData().toString():text;
                 draft_ = replaceGlobalBinding(draft_, key, value, profile_->currentData().toString());
                 const QSignalBlocker block(advanced_);
                 advanced_->setPlainText(draft_);
@@ -550,9 +558,9 @@ private:
             buttonCanvas_->setSelected(index);title->setText(QStringList{QStringLiteral("中键"),QStringLiteral("顶部按钮"),QStringLiteral("拇指滚轮"),QStringLiteral("前进"),QStringLiteral("后退"),QStringLiteral("手势")}[index]);
             const QStringList prefixes{"0052","00c4","thumb.","0056","0053","00c3"};
             for(auto it=bindings_.cbegin();it!=bindings_.cend();++it)form->setRowVisible(it.value(),it.key().startsWith(prefixes[index]));
-            drawer->show();
+            navigation_->hide();drawer->show();
         };
-        connect(close,&QPushButton::clicked,this,[this,drawer]{drawer->hide();buttonCanvas_->setSelected(-1);});drawer->hide();
+        connect(close,&QPushButton::clicked,this,[this,drawer]{drawer->hide();buttonCanvas_->setSelected(-1);navigation_->show();});drawer->hide();
         return outer;
     }
 
@@ -577,15 +585,15 @@ private:
         smartForm_ = form;
         trigger_ = new QComboBox(page); trigger_->setObjectName(QStringLiteral("smartTrigger"));
         const QList<QPair<QString, QString>> triggers{
-            {QStringLiteral("Middle button"), QStringLiteral("0052")}, {QStringLiteral("Back button"), QStringLiteral("0053")},
-            {QStringLiteral("Forward button"), QStringLiteral("0056")}, {QStringLiteral("Top button"), QStringLiteral("00c4")},
-            {QStringLiteral("Gesture click"), QStringLiteral("00c3")}, {QStringLiteral("Gesture left"), QStringLiteral("00c3.left")},
-            {QStringLiteral("Gesture right"), QStringLiteral("00c3.right")}, {QStringLiteral("Global shortcut"), QStringLiteral("hotkey")}};
+            {QStringLiteral("中键"), QStringLiteral("0052")}, {QStringLiteral("后退按钮"), QStringLiteral("0053")},
+            {QStringLiteral("前进按钮"), QStringLiteral("0056")}, {QStringLiteral("顶部按钮"), QStringLiteral("00c4")},
+            {QStringLiteral("拇指按钮 · 单击"), QStringLiteral("00c3")}, {QStringLiteral("手势 · 向左"), QStringLiteral("00c3.left")},
+            {QStringLiteral("手势 · 向右"), QStringLiteral("00c3.right")}, {QStringLiteral("全局快捷键"), QStringLiteral("hotkey")}};
         for (const auto& pair : triggers) trigger_->addItem(pair.first, pair.second);
         form->addRow(QStringLiteral("触发器"), trigger_);
         hotkey_ = new QKeySequenceEdit(page); hotkey_->setObjectName(QStringLiteral("smartHotkey"));
         hotkey_->setKeySequence(QKeySequence(QStringLiteral("Ctrl+Shift+F10"))); hotkey_->setEnabled(false);
-        form->addRow(QStringLiteral("Shortcut trigger"), hotkey_);
+        form->addRow(QStringLiteral("快捷键"), hotkey_);
         form->setRowVisible(hotkey_, false);
         layout->addLayout(form);
         auto* then=new QLabel(QStringLiteral("那么…"));then->setStyleSheet("font-size:22px;");layout->addWidget(then);
@@ -624,14 +632,16 @@ private:
     void addStep(const QString& type, const QString& value) {
         const int row = steps_->rowCount(); steps_->insertRow(row);
         auto* choice = new QComboBox(steps_);
-        choice->addItems({QStringLiteral("Shortcut"), QStringLiteral("Wait"), QStringLiteral("Text"),
-            QStringLiteral("Open"), QStringLiteral("Built-in")});
-        choice->setCurrentText(type); steps_->setCellWidget(row, 0, choice);
+        for(const auto& pair:QList<QPair<QString,QString>>{{QStringLiteral("键盘快捷键"),"Shortcut"},{QStringLiteral("等待"),"Wait"},
+            {QStringLiteral("输入文本"),"Text"},{QStringLiteral("打开文件或网址"),"Open"},{QStringLiteral("系统操作"),"Built-in"}})
+            choice->addItem(pair.first,pair.second);
+        choice->setCurrentIndex(choice->findData(type)); steps_->setCellWidget(row, 0, choice);
         auto* input = new QLineEdit(value, steps_); steps_->setCellWidget(row, 1, input);
-        input->setPlaceholderText(type == QStringLiteral("Wait") ? QStringLiteral("Milliseconds, e.g. 400") : QStringLiteral("Action value"));
+        input->setPlaceholderText(type == QStringLiteral("Wait") ? QStringLiteral("毫秒，例如 400") : QStringLiteral("操作内容"));
         steps_->setRowHeight(row, 66);
         connect(input, &QLineEdit::textEdited, this, [this] { updateSmart(); });
-        connect(choice, &QComboBox::currentTextChanged, this, [this, input](const QString& type) {
+        connect(choice, &QComboBox::currentIndexChanged, this, [this, input,choice](int) {
+            const auto type=choice->currentData().toString();
             input->setPlaceholderText(type == QStringLiteral("Wait") ? QStringLiteral("Milliseconds, e.g. 400") :
                 type == QStringLiteral("Text") ? QStringLiteral("Text to paste") :
                 type == QStringLiteral("Open") ? QStringLiteral("File path or URL") :
@@ -643,7 +653,7 @@ private:
     QString smartSequence() const {
         QStringList result;
         for (int row = 0; row < steps_->rowCount(); ++row) {
-            const auto type = static_cast<QComboBox*>(steps_->cellWidget(row, 0))->currentText();
+            const auto type = static_cast<QComboBox*>(steps_->cellWidget(row, 0))->currentData().toString();
             auto value = static_cast<QLineEdit*>(steps_->cellWidget(row, 1))->text();
             if (type == QStringLiteral("Text")) {
                 QString encoded;
@@ -693,9 +703,9 @@ private:
         auto* value = static_cast<QLineEdit*>(steps_->cellWidget(row, 1));
         auto* otherType = static_cast<QComboBox*>(steps_->cellWidget(target, 0));
         auto* otherValue = static_cast<QLineEdit*>(steps_->cellWidget(target, 1));
-        const auto savedType = type->currentText(), savedValue = value->text();
-        loading_ = true; type->setCurrentText(otherType->currentText()); value->setText(otherValue->text());
-        otherType->setCurrentText(savedType); otherValue->setText(savedValue); loading_ = false;
+        const auto savedType = type->currentData().toString(), savedValue = value->text();
+        loading_ = true; type->setCurrentIndex(type->findData(otherType->currentData())); value->setText(otherValue->text());
+        otherType->setCurrentIndex(otherType->findData(savedType)); otherValue->setText(savedValue); loading_ = false;
         steps_->selectRow(target); updateSmart();
     }
 
@@ -776,8 +786,10 @@ private:
         auto entries = globalBindings(text);
         const auto overrides = globalBindings(text, profile_->currentData().toString());
         for (auto it = overrides.cbegin(); it != overrides.cend(); ++it) entries[it.key()] = it.value();
-        for (auto it = bindings_.cbegin(); it != bindings_.cend(); ++it)
-            it.value()->setCurrentText(entries.value(it.key()));
+        for (auto it = bindings_.cbegin(); it != bindings_.cend(); ++it){
+            const auto value=entries.value(it.key());const int index=it.value()->findData(value);
+            if(index>=0)it.value()->setCurrentIndex(index);else it.value()->setEditText(value);
+        }
         if (updateSteps) loadSmart();
         loading_ = false;
         syncCanvases();
@@ -926,7 +938,7 @@ private:
     unsigned revision_ = 0;
     QLabel *device_{}, *agent_{}, *status_{}, *battery_{};
     QHBoxLayout* profileBar_{};
-    QWidget* profileEditor_{};
+    QWidget *profileEditor_{},*navigation_{};
     QTabWidget* pages_{};
     loo_ui::DeviceCanvas *buttonCanvas_{},*pointerCanvas_{};
     QSpinBox *dpi_{}, *smartShift_{};
@@ -1025,6 +1037,7 @@ int interactionTests() {
     if (!await([&] { return globalBindings(readFile(path), QStringLiteral("firefox")).value(QStringLiteral("0053")) == QStringLiteral("Ctrl+Tab"); })) return 14;
     if (globalBindings(readFile(path)).value(QStringLiteral("0053")) != QStringLiteral("MouseBack")) return 15;
     if (!screenshot(window,QStringLiteral("linux-button-sidebar.png")))return 30;
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("closeButtonDrawer")),Qt::LeftButton);
     QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("nav0")),Qt::LeftButton);
     QTest::mouseClick(tabs->widget(0)->findChild<QPushButton*>(QStringLiteral("hotspot_1")),Qt::LeftButton);
     if (!screenshot(window,QStringLiteral("linux-pointer-sidebar.png")))return 31;

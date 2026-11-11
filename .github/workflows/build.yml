@@ -8,9 +8,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependencies
+        timeout-minutes: 10
         run: |
-          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          sudo apt-get update
+          sh tests/prepare-ci-apt.sh
           sudo apt-get install -y clang-19 ninja-build libhidapi-dev libglib2.0-dev qt6-base-dev libgl1-mesa-dev libx11-dev libxtst-dev libwayland-dev libmutter-14-dev gobject-introspection libgirepository1.0-dev xvfb xauth x11-utils fonts-noto-cjk openbox
           python3 -m pip install 'cmake>=4.1,<4.2'
       - name: Configure
@@ -47,9 +47,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Native desktop dependencies
+        timeout-minutes: 10
         run: |
-          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          sudo apt-get update
+          sh tests/prepare-ci-apt.sh
           sudo apt-get install -y --no-install-recommends clang-19 ninja-build libhidapi-dev libglib2.0-dev qt6-base-dev qt6-wayland libgl1-mesa-dev libgl1-mesa-dri libegl-mesa0 libx11-dev libxtst-dev libwayland-dev libmutter-14-dev gobject-introspection libgirepository1.0-dev xvfb xauth dbus-x11 python3-gi acl fuse3 fonts-noto-cjk
           if [ '${{ matrix.desktop }}' = gnome ]; then
             sudo apt-get install -y --no-install-recommends gnome-shell gjs
