@@ -1,0 +1,53 @@
+name: Build and test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 ninja-build libhidapi-dev qt6-base-dev libgl1-mesa-dev
+          python3 -m pip install 'cmake>=4.1,<4.2'
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test without hardware
+        run: ctest --test-dir build --output-on-failure
+      - name: Package
+        run: cd build && cpack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logi-options-open-linux-x64
+          path: build/logi-options-open-*.tar.gz
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-python
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel 2
+      - name: Test without hardware
+        run: |
+          ctest --test-dir build --output-on-failure
+          ./build/logi-cli.exe check-config ./default-windows.ini
+          python -m py_compile bridge.py
+      - name: Package
+        run: cd build && cpack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logi-options-open-windows-x64
+          path: build/logi-options-open-*.zip

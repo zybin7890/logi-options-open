@@ -1,0 +1,6 @@
+# Opt-in permissions. Create group logioptions and add only trusted local users.
+# uinput access permits synthetic keyboard/mouse events; do not use MODE=0666.
+ACTION=="add|change", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", GROUP="logioptions", MODE="0660"
+# Bluetooth HID exposes HID_ID on the parent hid device.
+ACTION=="add|change", SUBSYSTEM=="hidraw", KERNELS=="0005:046D:*", GROUP="logioptions", MODE="0660"
+ACTION=="add|change", SUBSYSTEM=="misc", KERNEL=="uinput", GROUP="logioptions", MODE="0660"
