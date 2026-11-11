@@ -12,8 +12,8 @@ class QPushButton;
 namespace loo_ui {
 enum class DeviceMode { Buttons, Pointer };
 
-// A shared device scene: physical controls stay anchored to the illustration,
-// while the two outside label columns reflow independently of window size.
+// A shared device scene: controls and nearby labels use the original native
+// illustration's local coordinates, independent of the surrounding window.
 class DeviceCanvas final : public QWidget {
 public:
     explicit DeviceCanvas(QWidget* parent = nullptr);

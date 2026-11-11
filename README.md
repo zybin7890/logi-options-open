@@ -4,6 +4,8 @@
 
 原生鼠标设置与改键工具，面向支持 HID++ 2.0 的 Logitech 鼠标，首先适配 MX Master 3S。Windows 和 Linux 直接编译同一份 `ui/` C++26 / Qt6 Widgets 界面与资源，不使用浏览器，也不分别维护两套页面。系统路径、快捷键与命令确认差异集中于 `ui/platform.cpp`；后台分别使用 Windows HID API 与 Linux hidapi / uinput。没有账号、广告、营销或遥测。
 
+两端均可复用程序旁 `assets/` 中的 `side.png`、`front.png`、`back.png`、`firefox.png`、`chrome.png` 和 `wps.png`，缺少时使用内嵌素材。公开仓库不包含从官方软件提取的图片。
+
 > 功能不完整，错误可能导致自定义按键、滚轮或手势暂时失效。免责声明只需首次确认一次，GUI 与 CLI 共用本机记录，重启和升级不重复显示；拒绝则退出，不接管设备。软件不提供担保。请保留停止后台和恢复标准输入的方法。
 
 ## 平台状态

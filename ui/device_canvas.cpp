@@ -1,4 +1,5 @@
 #include "device_canvas.hpp"
+#include "assets.hpp"
 
 #include <QFontMetrics>
 #include <QPainter>
@@ -12,14 +13,14 @@
 namespace loo_ui {
 namespace {
 const QColor background("#1a1a1a"), surface("#151515"), accent("#00d8c6");
-struct Point { double x, y; bool left; const char* caption; };
+struct Point { double x, y; int align, width; const char* caption; };
 constexpr std::array buttonPoints{
-    Point{.71,.15,false,"滚轮按钮"}, Point{.81,.34,false,"顶部按钮"},
-    Point{.55,.51,false,"拇指滚轮"}, Point{.35,.43,true,"前进按钮"},
-    Point{.45,.60,true,"后退按钮"}, Point{.08,.58,true,"拇指按钮"}};
+    Point{.71,.15,1,86,"滚轮按钮"}, Point{.81,.34,1,86,"顶部按钮"},
+    Point{.55,.51,1,132,"拇指滚轮"}, Point{.35,.43,-1,86,"前进按钮"},
+    Point{.45,.60,0,86,"后退按钮"}, Point{.08,.58,-1,92,"拇指按钮"}};
 constexpr std::array pointerPoints{
-    Point{.73,.16,false,"滚轮"}, Point{.83,.54,false,"指针速度"},
-    Point{.55,.51,true,"拇指滚轮"}};
+    Point{.73,.16,1,148,"滚轮"}, Point{.83,.54,1,135,"指针速度"},
+    Point{.55,.51,-1,132,"拇指滚轮"}};
 std::span<const Point> points(DeviceMode mode) {
     return mode==DeviceMode::Buttons?std::span<const Point>(buttonPoints):std::span<const Point>(pointerPoints);
 }
@@ -33,29 +34,37 @@ public:
     }
     QString title,detail;
     bool active{};
+    int cardWidth(int minimum) const {
+        QFont heading=font();heading.setWeight(QFont::DemiBold);heading.setPixelSize(15);
+        QFont body=font();body.setPixelSize(13);
+        int width=minimum;
+        for(const auto& line:title.split('\n'))width=std::max(width,QFontMetrics(heading).horizontalAdvance(line)+28);
+        for(const auto& line:detail.split('\n'))width=std::max(width,QFontMetrics(body).horizontalAdvance(line)+28);
+        return std::min(width,210);
+    }
     int cardHeight(int width) const {
-        QFont heading=font();heading.setBold(true);heading.setPixelSize(16);
+        QFont heading=font();heading.setWeight(QFont::DemiBold);heading.setPixelSize(15);
         QFont body=font();body.setPixelSize(13);
         const int titleHeight=std::min(QFontMetrics(heading).boundingRect(QRect(0,0,width-28,1000),Qt::TextWordWrap,title).height(),QFontMetrics(heading).height()*2);
         const int detailHeight=detail.isEmpty()?0:std::min(QFontMetrics(body).boundingRect(QRect(0,0,width-28,1000),Qt::TextWordWrap,detail).height(),QFontMetrics(body).height()*4)+5;
-        return std::max(64,24+titleHeight+detailHeight);
+        return std::max(56,22+titleHeight+detailHeight);
     }
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);p.setRenderHint(QPainter::Antialiasing);
         if(dot_) {
-            p.setBrush(background);p.setPen(QPen(active?accent:QColor("#eeeeee"),2));
-            p.drawEllipse(QRectF(rect()).adjusted(6,6,-6,-6));
+            p.setBrush(QColor(20,20,20,110));p.setPen(QPen(active?accent:QColor("#eeeeee"),2));
+            p.drawEllipse(QRectF(rect()).adjusted(7,7,-7,-7));
             if(hasFocus()){p.setBrush(Qt::NoBrush);p.setPen(QPen(accent,1,Qt::DashLine));p.drawEllipse(QRectF(rect()).adjusted(2,2,-2,-2));}
             return;
         }
         const QRectF box=QRectF(rect()).adjusted(1,1,-1,-1);
         p.setBrush(active?accent:surface);
-        p.setPen(QPen(hasFocus()||underMouse()?accent:QColor("#303030"),hasFocus()?2:1));
-        p.drawRoundedRect(box,5,5);
+        p.setPen(QPen(hasFocus()||underMouse()?accent:QColor("#292929"),hasFocus()?2:1));
+        p.drawRoundedRect(box,3,3);
         const QColor ink=active?QColor("#001e1b"):QColor("#f5f5f5");
         p.setPen(ink);
-        QFont heading=font();heading.setBold(true);heading.setPixelSize(16);p.setFont(heading);
+        QFont heading=font();heading.setWeight(QFont::DemiBold);heading.setPixelSize(15);p.setFont(heading);
         const QFontMetrics headingMetrics(heading);
         const int titleHeight=std::min(headingMetrics.boundingRect(QRect(0,0,width()-28,1000),Qt::TextWordWrap,title).height(),headingMetrics.height()*2);
         p.save();p.setClipRect(QRect(14,12,width()-28,titleHeight));
@@ -69,7 +78,7 @@ private:
 };
 }
 
-DeviceCanvas::DeviceCanvas(QWidget* parent):QWidget(parent),mouse_(QStringLiteral(":/assets/side.png")) {
+DeviceCanvas::DeviceCanvas(QWidget* parent):QWidget(parent),mouse_(assetPixmap(QStringLiteral("side.png"))) {
     setObjectName(QStringLiteral("deviceCanvas"));
     setMinimumSize(minimumSizeHint());
     setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
@@ -99,6 +108,7 @@ void DeviceCanvas::setLabels(const QStringList& labels) {
         auto* card=static_cast<ControlButton*>(cards_[i]);
         const auto caption=QString::fromUtf8(definitions[i].caption);
         card->title=mode_==DeviceMode::Buttons?labels.value(i,defaults.value(i)):caption;
+        if(mode_==DeviceMode::Buttons && i==2)card->title.replace(QStringLiteral(" / "),QStringLiteral(" /\n"));
         card->detail=mode_==DeviceMode::Buttons?caption:labels.value(i,QStringLiteral("未读取"));
         const auto description=card->title+QStringLiteral("\n")+card->detail;
         for(auto* button:{cards_[i],pins_[i]}) {
@@ -129,43 +139,46 @@ void DeviceCanvas::activate(int index){setSelected(index);if(selected)selected(i
 void DeviceCanvas::resizeEvent(QResizeEvent* event){QWidget::resizeEvent(event);arrange();}
 void DeviceCanvas::arrange() {
     const auto definitions=points(mode_);if(cards_.isEmpty())return;
-    constexpr int margin=16,gap=14;
-    const int cardWidth=std::clamp((width()-180)/2,128,184);
+    constexpr int margin=12,gap=8;
     const double ratio=mouse_.isNull()?300.0/481.0:double(mouse_.width())/mouse_.height();
-    const double imageWidth=std::max(1.0,std::min({300.0,double(width()-2*cardWidth-2*margin-2*gap),double(height()-60)*ratio}));
+    // Match the original native scene: image-centred labels sit beside their
+    // physical controls, including the Back label underneath its pin. Wider
+    // windows add breathing room instead of stretching leaders across the page.
+    const double imageWidth=std::max(1.0,std::min({double(width()-220),482.0*ratio,double(height()-84)*ratio}));
     const double imageHeight=imageWidth/ratio;
     image_=QRectF((width()-imageWidth)/2,(height()-imageHeight)/2,imageWidth,imageHeight);
     anchors_.clear();
+    QVector<QRect> positions;
     for(int i=0;i<cards_.size();++i) {
         anchors_.append(QPointF(image_.left()+definitions[i].x*image_.width(),image_.top()+definitions[i].y*image_.height()));
         pins_[i]->setGeometry(qRound(anchors_[i].x())-14,qRound(anchors_[i].y())-14,28,28);
+        auto* card=static_cast<ControlButton*>(cards_[i]);
+        const int w=card->cardWidth(definitions[i].width),h=card->cardHeight(w);
+        const auto pin=anchors_[i];
+        const int x=qRound(definitions[i].align<0?pin.x()-w-24:definitions[i].align==0?pin.x()-w/2+4:pin.x()+28);
+        const int y=qRound(definitions[i].align==0?pin.y()+29:pin.y()-h/2);
+        positions.append(QRect(std::clamp(x,margin,std::max(margin,width()-margin-w)),std::clamp(y,margin,std::max(margin,height()-margin-h)),w,h));
     }
-    for(bool left:{true,false}) {
-        QVector<int> indices;
-        for(int i=0;i<cards_.size();++i)if(definitions[i].left==left)indices.append(i);
-        std::ranges::sort(indices,[&](int a,int b){return anchors_[a].y()<anchors_[b].y();});
-        int bottom=margin-gap;
-        for(const int i:indices) {
-            const int h=static_cast<ControlButton*>(cards_[i])->cardHeight(cardWidth);
-            const int y=std::max(bottom+gap,qRound(anchors_[i].y())-h/2);
-            cards_[i]->setGeometry(left?margin:width()-margin-cardWidth,y,cardWidth,h);bottom=y+h;
-        }
-        int top=height()-margin+gap;
-        for(auto it=indices.crbegin();it!=indices.crend();++it) {
-            auto* card=cards_[*it];const int y=std::min(card->y(),top-gap-card->height());
-            card->move(card->x(),y);top=y;
+    QVector<int> order;
+    for(int i=0;i<cards_.size();++i)order.append(i);
+    std::ranges::stable_sort(order,[&](int a,int b){return positions[a].top()<positions[b].top();});
+    for(int n=0;n<order.size();++n) {
+        auto& box=positions[order[n]];
+        for(int previous=0;previous<n;++previous) {
+            const auto& above=positions[order[previous]];
+            if(box.adjusted(-gap,-gap,gap,gap).intersects(above))box.moveTop(above.bottom()+gap+1);
         }
     }
+    for(int i=0;i<cards_.size();++i)cards_[i]->setGeometry(positions[i]);
     update();
 }
 void DeviceCanvas::paintEvent(QPaintEvent*) {
     QPainter p(this);p.fillRect(rect(),background);p.setRenderHint(QPainter::Antialiasing);p.setRenderHint(QPainter::SmoothPixmapTransform);
     if(!mouse_.isNull())p.drawPixmap(image_,mouse_,QRectF(mouse_.rect()));
-    const auto definitions=points(mode_);
     for(int i=0;i<cards_.size();++i) {
         const auto box=cards_[i]->geometry();
-        const QPointF edge(definitions[i].left?box.right():box.left(),std::clamp(anchors_[i].y(),double(box.top()+12),double(box.bottom()-12)));
-        p.setPen(QPen(i==selected_?accent:QColor("#626262"),1,Qt::DashLine));p.drawLine(edge,anchors_[i]);
+        const QPointF edge(std::clamp(anchors_[i].x(),double(box.left()),double(box.right())),std::clamp(anchors_[i].y(),double(box.top()),double(box.bottom())));
+        p.setPen(QPen(i==selected_?accent:QColor("#494949"),1));p.drawLine(edge,anchors_[i]);
     }
 }
 }

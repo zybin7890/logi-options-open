@@ -105,6 +105,10 @@ jobs:
         with:
           name: windows-behavior-evidence
           path: build/test-evidence/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-shared-ui-binary
+          path: build/logi-native.exe
       - name: Package
         run: cd build && cpack
       - name: Extracted Windows package without SDK PATH
