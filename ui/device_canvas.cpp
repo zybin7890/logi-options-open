@@ -31,6 +31,7 @@ public:
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
         setAutoDefault(false);
+        if(dot_)setStyleSheet(QStringLiteral("QPushButton{background:transparent;border:0;padding:0;}"));
     }
     QString title,detail;
     bool active{};
