@@ -192,6 +192,16 @@ void Desktop::validate(const Config& config)const {
     for(const auto& [name,items]:config.folders)for(const auto& item:items)text|=text_actions(item.actions);
     if((text || !config.profiles.empty() || !config.hotkeys.empty()) && !available())throw std::runtime_error(reason());
     if(text && !impl_->xtest)throw std::runtime_error("Text requires the XTEST extension");
+    for(const auto& hotkey:config.hotkeys) {
+        unsigned code{},mask{},consumed{};KeySym resolved{};
+        for(auto key:hotkey.keys)if(auto mod=modifier(key))mask|=mod;else code=impl_->code(key);
+        if(code && XkbLookupKeySym(impl_->display,code,mask,&consumed,&resolved) &&
+           resolved>=XF86XK_Switch_VT_1 && resolved<=XF86XK_Switch_VT_12) {
+            const auto name=XKeysymToString(resolved);
+            throw std::runtime_error("Global hotkey "+hotkey.name+" resolves to reserved X11 keysym "+
+                (name?std::string(name):std::to_string(resolved))+"; choose a non-reserved shortcut");
+        }
+    }
 }
 void Desktop::configure_hotkeys(const Config& config) {
     validate(config);if(!available())return;

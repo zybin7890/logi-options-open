@@ -52,7 +52,7 @@ namespace {
 
 constexpr auto title = "Logi Options Open";
 constexpr auto fallback_config =
-    "# Global Linux mappings. Application profiles are not supported yet.\n"
+    "# Linux mappings. Named application sections override the global profile on X11.\n"
     "[global]\n0052 = MouseMiddle\n0053 = MouseBack\n0056 = MouseForward\n"
     "00C4 = WheelMode\n00C3 = Super+Tab\n00C3.left = Ctrl+Alt+Left\n"
     "00C3.right = Ctrl+Alt+Right\n00C3.up = Super\n00C3.down = Super+D\n"
@@ -432,7 +432,7 @@ private:
         for (const auto& pair : triggers) trigger_->addItem(pair.first, pair.second);
         form->addRow(QStringLiteral("When"), trigger_);
         hotkey_ = new QKeySequenceEdit(page); hotkey_->setObjectName(QStringLiteral("smartHotkey"));
-        hotkey_->setKeySequence(QKeySequence(QStringLiteral("Ctrl+Alt+F10"))); hotkey_->setEnabled(false);
+        hotkey_->setKeySequence(QKeySequence(QStringLiteral("Ctrl+Shift+F10"))); hotkey_->setEnabled(false);
         form->addRow(QStringLiteral("Shortcut trigger"), hotkey_);
         form->setRowVisible(hotkey_, false);
         layout->addLayout(form);

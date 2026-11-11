@@ -95,8 +95,11 @@ and `thumb.speed=10..200` scales its resolution. Example actions include
 `Ctrl+C;Wait(100);Ctrl+V`. `Open(file-or-URL)` invokes xdg-open without a shell.
 Desktop shortcuts differ by compositor; edit the defaults for your desktop.
 
-`[hotkeys]` registers X11 global triggers, for example `Ctrl+Alt+F10=Ctrl+C;Wait(100);Ctrl+V`.
-Conflicts fail explicitly; generated actions temporarily suspend this process's
+`[hotkeys]` registers X11 global triggers, for example `Ctrl+Shift+F10=Ctrl+C;Wait(100);Ctrl+V`.
+Shortcuts mapped by XKB to virtual-terminal switching (commonly Ctrl+Alt+F1–F12)
+are rejected with their actual reserved keysym, rather than silently registering
+a trigger the application cannot receive. Other conflicts fail explicitly;
+generated actions temporarily suspend this process's
 grabs to avoid recursively triggering themselves. `Text(hello)` and UTF-16 encoded
 `TextHex(...)` paste UTF-8 through the X11 clipboard; **this replaces CLIPBOARD**
 and requires a target application that supports Ctrl+V. The daemon services
@@ -116,6 +119,9 @@ Single mouse-button mappings preserve down/up for dragging, including correct
 release after a profile switch. Reload, disconnect and shutdown release held
 virtual buttons. The daemon retries a lost device and restores its saved diversion
 state before reapplying mappings. Crash/forced-exit recovery still uses `recover-input`.
+Stopping while the physical device is offline cannot restore that offline device;
+after reconnecting, use `recover-input` if its controls remain diverted. Saved
+restoration state is retained in memory only while the daemon stays running.
 
 Application matching, global triggers and text paste currently require **X11**.
 Wayland/Xwayland sessions reject those features explicitly; basic uinput global

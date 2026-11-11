@@ -23,6 +23,7 @@ compile_commands.json
 mappings.ini
 first-run*
 acknowledgment*
+disclaimer-*.accepted
 .env
 .env.*
 *.token

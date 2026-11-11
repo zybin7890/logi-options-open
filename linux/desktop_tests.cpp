@@ -109,7 +109,17 @@ int main() {
     try {
         Receiver receiver;Desktop desktop;require(desktop.available(),desktop.reason().c_str());
         std::vector<std::vector<Action>> fired;
-        auto config=parse("[global]\n0053=Ctrl+A\n0056=Ctrl+C\n[loo-editor]\n0053=Ctrl+E\n[loobrowser]\n0053=Ctrl+B\n[hotkeys]\nCtrl+Alt+F10=Text(Triggered)\n");
+        // The CI XKB layout resolves Ctrl+Alt+Fn to a server VT action. A
+        // successful XGrabKey alone did not mean that the trigger could fire.
+        auto reserved=parse("[hotkeys]\nCtrl+Alt+F10=Text(Reserved)\n");
+        bool reserved_rejected=false;
+        try{desktop.configure_hotkeys(reserved);}
+        catch(const std::exception& error) {
+            require(std::string(error.what()).find("XF86Switch_VT_10")!=std::string::npos,"Expected the actual reserved XKB keysym");
+            std::cout<<"Reserved trigger rejected: "<<error.what()<<std::endl;reserved_rejected=true;
+        }
+        require(reserved_rejected,"Server-reserved VT shortcut was silently accepted");
+        auto config=parse("[global]\n0053=Ctrl+A\n0056=Ctrl+C\n[loo-editor]\n0053=Ctrl+E\n[loobrowser]\n0053=Ctrl+B\n[hotkeys]\nCtrl+Shift+F10=Text(Triggered)\n");
         desktop.configure_hotkeys(config);
         receiver.activate(receiver.first);
         until("editor foreground",desktop,receiver,[&]{const auto ids=desktop.foreground();return std::ranges::find(ids,"loo-editor")!=ids.end();},fired);
@@ -125,30 +135,30 @@ int main() {
 
         // Hold trigger modifiers after releasing the main key: no action fires
         // until the user's modifiers are up. Also exercise modifier-first release.
-        receiver.key(XK_Control_L,true);receiver.key(XK_Alt_L,true);receiver.key(XK_F10,true);
+        receiver.key(XK_Control_L,true);receiver.key(XK_Shift_L,true);receiver.key(XK_F10,true);
         desktop.poll_hotkeys();receiver.key(XK_F10,false);
         require(desktop.poll_hotkeys().empty(),"Hotkey fired with held modifiers");
-        receiver.key(XK_Alt_L,false);receiver.key(XK_Control_L,false);
+        receiver.key(XK_Shift_L,false);receiver.key(XK_Control_L,false);
         until("global trigger normal release",desktop,receiver,[&]{return fired.size()==1;},fired);
         require(fired[0][0].text=="Triggered","Wrong hotkey action");
-        receiver.key(XK_Control_L,true);receiver.key(XK_Alt_L,true);receiver.key(XK_F10,true);
-        desktop.poll_hotkeys();receiver.key(XK_Control_L,false);receiver.key(XK_Alt_L,false);receiver.key(XK_F10,false);
+        receiver.key(XK_Control_L,true);receiver.key(XK_Shift_L,true);receiver.key(XK_F10,true);
+        desktop.poll_hotkeys();receiver.key(XK_Control_L,false);receiver.key(XK_Shift_L,false);receiver.key(XK_F10,false);
         until("global trigger modifiers-first release",desktop,receiver,[&]{return fired.size()==2;},fired);
         require(receiver.modifiers_up(),"Hotkey left modifier down");
 
         // A different client owns F9. Failed replacement must retain F10.
         const auto f9=XKeysymToKeycode(receiver.display,XK_F9);
-        XGrabKey(receiver.display,f9,ControlMask|Mod1Mask,DefaultRootWindow(receiver.display),False,GrabModeAsync,GrabModeAsync);
+        XGrabKey(receiver.display,f9,ControlMask|ShiftMask,DefaultRootWindow(receiver.display),False,GrabModeAsync,GrabModeAsync);
         XSync(receiver.display,False);
-        auto conflict=parse("[hotkeys]\nCtrl+Alt+F9=Text(Conflict)\n");
+        auto conflict=parse("[hotkeys]\nCtrl+Shift+F9=Text(Conflict)\n");
         rejects([&]{desktop.configure_hotkeys(conflict);});
-        desktop.inject_chord({KEY_LEFTCTRL,KEY_LEFTALT,KEY_F10});
+        desktop.inject_chord({KEY_LEFTCTRL,KEY_LEFTSHIFT,KEY_F10});
         until("old trigger after conflicting reload",desktop,receiver,[&]{return fired.size()==3;},fired);
-        XUngrabKey(receiver.display,f9,ControlMask|Mod1Mask,DefaultRootWindow(receiver.display));XSync(receiver.display,False);
+        XUngrabKey(receiver.display,f9,ControlMask|ShiftMask,DefaultRootWindow(receiver.display));XSync(receiver.display,False);
 
         // The same chord emitted by an action must reach the focused client,
         // without recursively activating our global trigger.
-        desktop.suspend_hotkeys(true);desktop.inject_chord({KEY_LEFTCTRL,KEY_LEFTALT,KEY_F10});
+        desktop.suspend_hotkeys(true);desktop.inject_chord({KEY_LEFTCTRL,KEY_LEFTSHIFT,KEY_F10});
         until("suspended shortcut reaches client",desktop,receiver,[&]{return std::ranges::find(receiver.symbols,XK_F10)!=receiver.symbols.end();},fired);
         desktop.suspend_hotkeys(false);require(fired.size()==3,"Synthetic action recursively fired a trigger");
 
