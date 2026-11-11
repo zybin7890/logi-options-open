@@ -39,6 +39,9 @@
 #ifdef LOGI_GUI_TEST
 #include <QtTest/QTest>
 #include <QElapsedTimer>
+#include <QDebug>
+#include <QScreen>
+#include <QWindow>
 #endif
 
 #include <algorithm>
@@ -821,7 +824,23 @@ int interactionTests() {
     if (!writeFile(path, initial.toUtf8())) return 11;
     Window window(path, true, false); // Real asynchronous validator, no HID queries or backend start.
     window.show();
-    if (!QTest::qWaitForWindowExposed(&window)) return 12;
+    if (!QTest::qWaitForWindowExposed(&window)) {
+        const auto* handle = window.windowHandle();
+        auto* screen = handle ? handle->screen() : QGuiApplication::primaryScreen();
+        qCritical() << "GUI exposure failure: platform=" << QGuiApplication::platformName()
+            << "visible=" << window.isVisible() << "exposed=" << (handle && handle->isExposed())
+            << "visibility=" << (handle ? int(handle->visibility()) : -1)
+            << "geometry=" << window.geometry() << "screen=" << (screen ? screen->geometry() : QRect{})
+            << "active=" << QApplication::activeWindow() << "modal=" << QApplication::activeModalWidget()
+            << "popup=" << QApplication::activePopupWidget();
+        const auto evidence = qEnvironmentVariable("LOGI_TEST_EVIDENCE");
+        if (!evidence.isEmpty() && screen && QDir().mkpath(evidence)) {
+            const auto root = screen->grabWindow(0);
+            if (root.isNull() || !root.save(QDir(evidence).filePath(QStringLiteral("gui-exposure-failure-root.png"))))
+                qWarning("The platform could not capture the root window after exposure failure.");
+        }
+        return 12;
+    }
     const auto evidence = qEnvironmentVariable("LOGI_TEST_EVIDENCE");
     auto screenshot = [&](QWidget& widget, const QString& name) {
         if (evidence.isEmpty()) return true;

@@ -195,6 +195,7 @@ export default class OptionsOpenBridge extends Extension {
             const id = source.connect('consumed', () => {
                 if (!this._enabled || acknowledged) return;
                 acknowledged = true;
+                if (GLib.getenv('LOGI_GNOME_TRACE')) console.log(`Logi clipboard: consumed serial=${serial}`);
                 Gio.DBus.session.emit_signal(sender, PATH, NAME, 'ClipboardConsumed', new GLib.Variant('(u)', [serial]));
                 source.disconnect(id);
                 this._clipboardSignals.delete(source);
@@ -202,6 +203,7 @@ export default class OptionsOpenBridge extends Extension {
             this._clipboardSignals.set(source, {id, sender});
             global.display.get_selection().set_owner(Meta.SelectionType.CLIPBOARD, source);
             if (!source.is_active()) throw new Error('Compositor did not accept clipboard ownership');
+            if (GLib.getenv('LOGI_GNOME_TRACE')) console.log(`Logi clipboard: owner serial=${serial} foreground=${this.GetForeground().join(',')}`);
             this._source = source;
             this._sourceOwner = sender;
             return serial;

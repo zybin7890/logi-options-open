@@ -4,6 +4,7 @@
 #include "agent.hpp"
 #include "desktop.hpp"
 #include <QApplication>
+#include <QClipboard>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -23,12 +24,18 @@ using namespace loo_linux;
 namespace {
 void require(bool ok,const std::string& why){if(!ok)throw std::runtime_error(why);}
 struct Editor final:QTextEdit {
-    QJsonArray presses,pastes;
+    QJsonArray presses,pastes,key_events;
     unsigned releases{};
     void keyPressEvent(QKeyEvent* event) override {
-        presses.append(event->key());QTextEdit::keyPressEvent(event);
+        presses.append(event->key());
+        key_events.append(QJsonObject{{"key",event->key()},{"modifiers",int(event->modifiers())},{"pressed",true}});
+        QTextEdit::keyPressEvent(event);
     }
-    void keyReleaseEvent(QKeyEvent* event) override {++releases;QTextEdit::keyReleaseEvent(event);}
+    void keyReleaseEvent(QKeyEvent* event) override {
+        ++releases;
+        key_events.append(QJsonObject{{"key",event->key()},{"modifiers",int(event->modifiers())},{"pressed",false}});
+        QTextEdit::keyReleaseEvent(event);
+    }
     void insertFromMimeData(const QMimeData* data) override {
         pastes.append(data->text());QTextEdit::insertFromMimeData(data);
     }
@@ -45,20 +52,26 @@ int receiver(QApplication& app,const QString& id,const QString& status) {
     Editor editor;editor.setWindowTitle(id);editor.resize(720,440);editor.show();editor.setFocus();
     QTimer timer;QObject::connect(&timer,&QTimer::timeout,[&]{
         write_json(status,{{"platform",QGuiApplication::platformName()},{"id",id},
-            {"active",editor.isActiveWindow()},{"presses",editor.presses},{"releases",int(editor.releases)},
+            {"active",editor.isActiveWindow()},{"focus",editor.hasFocus()},
+            {"key_events",editor.key_events},{"clipboard_formats",QJsonArray::fromStringList(QApplication::clipboard()->mimeData()->formats())},
+            {"presses",editor.presses},{"releases",int(editor.releases)},
             {"pastes",editor.pastes},{"text",editor.toPlainText()}});
         if(qEnvironmentVariableIsSet("LOGI_TEST_EVIDENCE"))
             editor.grab().save(qEnvironmentVariable("LOGI_TEST_EVIDENCE")+"/"+id+".png");
     });timer.start(80);return app.exec();
 }
 struct Client {
-    QProcess process;QString status;
-    Client(const QString& id,const QString& dir):status(dir+"/"+id+".json") {
+    QProcess process;QString status,id;
+    Client(const QString& app_id,const QString& dir):status(dir+"/"+app_id+".json"),id(app_id) {
         process.setProcessChannelMode(QProcess::ForwardedChannels);
         process.start(QCoreApplication::applicationFilePath(),{"--receiver",id,status});
         require(process.waitForStarted(),"Receiver failed to start");
     }
-    ~Client(){process.terminate();if(!process.waitForFinished(1000)){process.kill();process.waitForFinished();}}
+    ~Client(){
+        if(auto evidence=qEnvironmentVariable("LOGI_TEST_EVIDENCE");!evidence.isEmpty())
+            write_json(evidence+"/"+id+"-state.json",state());
+        process.terminate();if(!process.waitForFinished(1000)){process.kill();process.waitForFinished();}
+    }
     QJsonObject state()const{return read_json(status);}
     bool key(int key)const {for(const auto v:state()["presses"].toArray())if(v.toInt()==key)return true;return false;}
     int key_count(int key)const {int count{};for(const auto v:state()["presses"].toArray())if(v.toInt()==key)++count;return count;}

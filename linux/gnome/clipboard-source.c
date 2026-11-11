@@ -12,6 +12,7 @@ static guint consumed_signal;
 
 static GList *source_mimetypes(MetaSelectionSource *source) {
     (void)source;
+    if (g_getenv("LOGI_GNOME_TRACE")) g_message("Logi clipboard: MIME formats requested");
     GList *types = NULL;
     types = g_list_append(types, g_strdup("text/plain;charset=utf-8"));
     types = g_list_append(types, g_strdup("text/plain"));
@@ -22,6 +23,7 @@ static void source_read_async(MetaSelectionSource *source, const char *mimetype,
                               GCancellable *cancellable, GAsyncReadyCallback callback,
                               gpointer user_data) {
     GTask *task = g_task_new(source, cancellable, callback, user_data);
+    if (g_getenv("LOGI_GNOME_TRACE")) g_message("Logi clipboard: read_async MIME=%s", mimetype);
     if (g_strcmp0(mimetype, "text/plain;charset=utf-8") != 0 &&
         g_strcmp0(mimetype, "text/plain") != 0 && g_strcmp0(mimetype, "UTF8_STRING") != 0) {
         g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
@@ -38,7 +40,10 @@ static GInputStream *source_read_finish(MetaSelectionSource *source, GAsyncResul
                                        GError **error) {
     g_return_val_if_fail(g_task_is_valid(result, source), NULL);
     GInputStream *stream = g_task_propagate_pointer(G_TASK(result), error);
-    if (stream) g_signal_emit(source, consumed_signal, 0);
+    if (stream) {
+        if (g_getenv("LOGI_GNOME_TRACE")) g_message("Logi clipboard: read_finish provides immutable stream");
+        g_signal_emit(source, consumed_signal, 0);
+    }
     return stream;
 }
 
