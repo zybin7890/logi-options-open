@@ -40,6 +40,7 @@
 #include <QPainter>
 #include <QVariantAnimation>
 #include <QButtonGroup>
+#include <QToolButton>
 #ifdef LOGI_GUI_TEST
 #include <QtTest/QTest>
 #include <QElapsedTimer>
@@ -206,7 +207,7 @@ public:
         addProfile->setObjectName(QStringLiteral("addProfile")); profiles->addWidget(addProfile);
         layout->addWidget(profileEditor_);profileEditor_->hide();
         auto* body=new QHBoxLayout;body->setSpacing(24);layout->addLayout(body,1);
-        auto* navigation=new QVBoxLayout;navigation->setSpacing(12);navigation->addStretch();body->addLayout(navigation);
+        auto* navigationWidget=new QWidget;auto* navigation=new QVBoxLayout(navigationWidget);navigation->setSpacing(12);navigation->addStretch();body->addWidget(navigationWidget);
         auto* tabs = new QTabWidget(central);
         tabs->setObjectName(QStringLiteral("pages"));
         tabs->tabBar()->hide();pages_=tabs;
@@ -226,6 +227,13 @@ public:
         controls->addWidget(start_);controls->addWidget(stop_);controls->addStretch();settingsLayout->addLayout(controls);
         auto* advanced=new QPushButton(QStringLiteral("高级配置"));settingsLayout->addWidget(advanced);settingsLayout->addStretch();
         tabs->addTab(settings,QStringLiteral("设置"));
+        auto* homePage=new QWidget;auto* homeLayout=new QVBoxLayout(homePage);homeLayout->addStretch();
+        auto* deviceCard=new QToolButton;deviceCard->setObjectName("openDevice");deviceCard->setText(QStringLiteral("MX Master 3S"));
+        deviceCard->setIcon(QIcon(QStringLiteral(":/assets/front.png")));deviceCard->setIconSize(QSize(200,300));
+        deviceCard->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);deviceCard->setFixedSize(280,390);
+        deviceCard->setStyleSheet("QToolButton{background:#202020;border:1px solid #303030;border-radius:16px;padding:24px;font-size:20px;}QToolButton:hover{border-color:#00d8c6;}");
+        homeLayout->addWidget(deviceCard,0,Qt::AlignHCenter);homeLayout->addStretch();tabs->addTab(homePage,QStringLiteral("首页"));
+        connect(deviceCard,&QToolButton::clicked,this,[tabs]{tabs->setCurrentIndex(1);});
         const QList<QPair<QString,int>> navigationPages{{QStringLiteral("按钮"),1},{QStringLiteral("指向和滚动"),0},
             {QStringLiteral("EASY-SWITCH"),5},{QStringLiteral("FLOW"),6},{QStringLiteral("设置"),7}};
         auto* navGroup=new QButtonGroup(this);navGroup->setExclusive(true);
@@ -236,15 +244,17 @@ public:
             connect(button,&QPushButton::clicked,this,[this,index]{pages_->setCurrentIndex(index);});
         }
         navigation->addStretch();
-        connect(tabs,&QTabWidget::currentChanged,this,[this,navGroup](int index){
+        connect(tabs,&QTabWidget::currentChanged,this,[this,navGroup,navigationWidget,heading](int index){
             if(auto* button=navGroup->button(index))button->setChecked(true);
+            navigationWidget->setVisible(index!=8 && index!=2 && index!=3);
+            heading->setText(index==8?QString::fromLatin1(title):index==2?QStringLiteral("Smart Actions"):index==3?QStringLiteral("Actions Ring"):QStringLiteral("MX Master 3S"));
             profileEditor_->hide();rebuildProfiles();
         });
         connect(smart,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(2);});
         connect(ring,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(3);});
         connect(advanced,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(4);});
-        connect(home,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(1);});
-        tabs->setCurrentIndex(1);
+        connect(home,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(8);});
+        tabs->setCurrentIndex(8);
         auto* footer = new QHBoxLayout;
         battery_=new QLabel(QStringLiteral("电量 —"));battery_->setObjectName("battery");footer->addWidget(battery_);footer->addStretch();
         layout->addLayout(footer);
@@ -363,8 +373,7 @@ public:
         thumbInvertSupported_ = settings.value(QStringLiteral("thumb-invert")).isDouble();
         updateThumbInvert();
         battery_->setText(object.value("battery").isDouble()?QStringLiteral("%1%  ▰").arg(object.value("battery").toInt()):QStringLiteral("电量 —"));
-        pointerCanvas_->setLabels({QStringLiteral("SmartShift: %1").arg(smartShift_->value()?QStringLiteral("开启"):QStringLiteral("关闭")),
-            QStringLiteral("%1 DPI").arg(dpi_->value()),QStringLiteral("水平滚动")});
+        updatePointerSummary();
         loading_ = false;
     }
 
@@ -375,6 +384,13 @@ public:
     }
 
 private:
+    void updatePointerSummary(){
+        pointerCanvas_->setLabels({QStringLiteral("SmartShift: %1\n滚动方向：%2")
+            .arg(smartShift_->value()?QStringLiteral("开启"):QStringLiteral("关闭"))
+            .arg(checks_.value("invert")->isChecked()?QStringLiteral("反向"):QStringLiteral("标准")),
+            QStringLiteral("%1 DPI").arg(dpi_->value()),
+            checks_.value("thumb-invert")->isChecked()?QStringLiteral("滚动方向：反向"):QStringLiteral("滚动方向：默认")});
+    }
     QWidget* informationPage(const QString& title,const QString& detail) {
         auto* page=new QWidget;auto* layout=new QVBoxLayout(page);layout->setContentsMargins(80,80,80,80);layout->addStretch();
         auto* heading=new QLabel(title);heading->setStyleSheet("font-size:30px;font-weight:600;");layout->addWidget(heading);
@@ -384,7 +400,7 @@ private:
         if(!profileBar_)return;
         while(auto* item=profileBar_->takeAt(0)){if(auto* widget=item->widget())widget->deleteLater();delete item;}
         profileBar_->addStretch();
-        if(!pages_ || (pages_->currentIndex()!=0 && pages_->currentIndex()!=1))return;
+        if(!pages_ || (pages_->currentIndex()!=0 && pages_->currentIndex()!=1 && pages_->currentIndex()!=2))return;
         const int count=pages_->currentIndex()==0?1:profile_->count();
         for(int i=0;i<count;++i){
             const auto name=profile_->itemData(i).toString();
@@ -399,7 +415,7 @@ private:
             button->setStyleSheet(QStringLiteral("QPushButton{border:0;border-radius:0;background:transparent;font-size:25px;border-bottom:3px solid %1;}QPushButton:hover{background:#242424;}").arg(selected?"#00d8c6":"transparent"));
             connect(button,&QPushButton::clicked,this,[this,i]{profile_->setCurrentIndex(i);rebuildProfiles();});profileBar_->addWidget(button);
         }
-        if(pages_->currentIndex()==1){
+        if(pages_->currentIndex()==1 || pages_->currentIndex()==2){
             auto* add=new QPushButton(QStringLiteral("＋"));add->setObjectName("openAddProfile");add->setAccessibleName(QStringLiteral("添加应用程序"));add->setFixedSize(48,48);
             connect(add,&QPushButton::clicked,this,[this]{profileEditor_->setVisible(!profileEditor_->isVisible());profileName_->setFocus();});profileBar_->addWidget(add);
         }
@@ -840,7 +856,8 @@ private:
         if (loading_) return;
         submit({QStringLiteral("set:") + setting, {QStringLiteral("set"), setting, QString::number(value)},
             [this, setting](bool ok, const QString&, const QString& error) {
-                message(ok ? setting + QStringLiteral(" applied and read back from device.") : error, !ok);
+                message(ok ? QStringLiteral("已应用并核对设备设置。") : error, !ok);
+                if(ok)updatePointerSummary();
                 if (!ok) refreshAll();
             }});
     }
@@ -986,6 +1003,8 @@ int interactionTests() {
         if (evidence.isEmpty()) return true;
         return QDir().mkpath(evidence) && widget.grab().save(QDir(evidence).filePath(name));
     };
+    if (!screenshot(window, QStringLiteral("linux-home.png"))) return 26;
+    QTest::mouseClick(window.findChild<QToolButton*>(QStringLiteral("openDevice")),Qt::LeftButton);
     if (!screenshot(window, QStringLiteral("linux-main-settings.png"))) return 26;
     auto await = [](const std::function<bool()>& condition) {
         QElapsedTimer elapsed; elapsed.start();
