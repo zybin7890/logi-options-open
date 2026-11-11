@@ -59,8 +59,8 @@ for ((i=0; i<200; ++i)); do
 done
 dbus-send --session --type=method_call --print-reply --dest=org.kde.klipper /klipper org.freedesktop.DBus.Introspectable.Introspect >"$evidence/kde-klipper-interface.log"
 
-# Only in this explicitly opted-in CI session, give the runner access to the
-# exact virtual input devices made by the test; never alter a physical keyboard.
+# Only in an explicitly opted-in disposable CI VM, allow keyboard-state queries
+# and access to the exact virtual input devices created by this test.
 if [[ "${LOGI_TEST_ALLOW_DEVICE_ACL:-}" == 1 ]]; then
     # GitHub's disposable VM includes an emulated keyboard. Complete modifier
     # release checks require its bitmap too; this opt-in is CI-only.
@@ -95,4 +95,4 @@ for ((i=0; i<200; ++i)); do
 done
 [[ "$ready" == 1 ]] || { cat "$evidence/kde-capabilities.log" "$evidence/kde-provider.log"; exit 1; }
 "$driver" 2>&1 | tee "$evidence/kde-wayland-test.log"
-"$bindir/logi-linux-gui-tests" 2>&1 | tee "$evidence/kde-gui-test.log"
+LOGI_TEST_REQUIRE_NATIVE_WAYLAND=1 "$bindir/logi-linux-gui-tests" 2>&1 | tee "$evidence/kde-gui-test.log"

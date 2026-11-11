@@ -73,6 +73,26 @@ for attempt in $(seq 1 160); do
     if [[ "$attempt" == 160 ]]; then cat "$evidence/gnome-shell.log" >&2; echo 'Native GNOME extension did not become available' >&2; exit 1; fi
     sleep 0.25
 done
+# A fresh GNOME profile starts in Overview, which intentionally keeps keyboard
+# focus in Shell. Wait for actual startup completion, then leave Overview through
+# its native D-Bus property before testing normal application focus behavior.
+for attempt in $(seq 1 160); do
+    if grep -q 'GNOME Shell started at' "$evidence/gnome-shell.log"; then break; fi
+    if ! kill -0 "$shell_pid" 2>/dev/null; then cat "$evidence/gnome-shell.log" >&2; exit 1; fi
+    if [[ "$attempt" == 160 ]]; then echo 'GNOME did not finish startup' >&2; exit 1; fi
+    sleep 0.25
+done
+gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+    --method org.freedesktop.DBus.Properties.Get org.gnome.Shell OverviewActive > "$evidence/gnome-overview-before.txt"
+gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+    --method org.freedesktop.DBus.Properties.Set org.gnome.Shell OverviewActive '<false>' >/dev/null
+for attempt in $(seq 1 40); do
+    gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+        --method org.freedesktop.DBus.Properties.Get org.gnome.Shell OverviewActive > "$evidence/gnome-overview-ready.txt"
+    if grep -q false "$evidence/gnome-overview-ready.txt"; then break; fi
+    if [[ "$attempt" == 40 ]]; then echo 'GNOME Overview did not close' >&2; exit 1; fi
+    sleep 0.1
+done
 python3 "$source_dir/evdev-to-mutter.py" > "$evidence/gnome-input-transport.log" 2>&1 &
 transport_pid=$!
 "$executable" "$@" > >(tee "$evidence/gnome-wayland-test.log") 2>&1

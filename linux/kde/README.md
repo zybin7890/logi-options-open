@@ -61,7 +61,7 @@ clear that application's clipboard. The provider removes only its own selection.
 ## CI transport and evidence
 
 `tests/run-kde-wayland.sh` starts a private D-Bus session and a real
-`kwin_wayland --virtual --no-lockscreen` compositor, with `DISPLAY` unset. It uses
+`kwin_wayland --virtual --no-lockscreen` compositor and Klipper, with `DISPLAY` unset. It uses
 the shared Qt Wayland test clients to verify native app IDs, focus changes,
 shortcuts, conflict rejection, owner cleanup and UTF-8 paste.
 
@@ -73,8 +73,11 @@ real; the compositor transport is a test adapter, not production hardware input.
 The test adapter is not installed as a user-facing input backend. No MX Master 3S
 hardware is implied by these tests.
 
-`LOGI_TEST_ALLOW_DEVICE_ACL=1` allows the isolated CI runner to grant access only
-to those named test devices. It does not change permissions on physical keyboards.
+`LOGI_TEST_ALLOW_DEVICE_ACL=1` is for a disposable CI VM only. It grants read access
+to that VM's existing event devices, including its emulated keyboard, and access
+to the named test devices created later. Do not enable it on a personal desktop.
+The fake-input grant is a desktop entry inside the temporary session data directory;
+the runner does not disable KWin's interface permission checks.
 The evidence includes compositor/provider logs, event transport counts and a
 provider RSS/CPU snapshot. That snapshot is not a full daemon performance test.
 
