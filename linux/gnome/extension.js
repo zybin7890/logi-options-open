@@ -60,7 +60,7 @@ export default class OptionsOpenBridge extends Extension {
         for (const sender of [...this._clients.keys()]) this._release(sender);
         for (const [source, metadata] of this._clipboardSignals) source.disconnect(metadata.id);
         this._clipboardSignals.clear();
-        if (this._source) global.display.get_selection().unset_owner(Meta.SelectionType.CLIPBOARD, this._source);
+        if (this._source) global.display.get_selection().unset_owner(Meta.SelectionType.SELECTION_CLIPBOARD, this._source);
         this._source = null;
         if (this._activation) global.display.disconnect(this._activation);
         if (this._focus) global.display.disconnect(this._focus);
@@ -205,7 +205,7 @@ export default class OptionsOpenBridge extends Extension {
                 this._clipboardSignals.delete(source);
             });
             this._clipboardSignals.set(source, {id, sender});
-            global.display.get_selection().set_owner(Meta.SelectionType.CLIPBOARD, source);
+            global.display.get_selection().set_owner(Meta.SelectionType.SELECTION_CLIPBOARD, source);
             if (!source.is_active()) throw new Error('Compositor did not accept clipboard ownership');
             if (GLib.getenv('LOGI_GNOME_TRACE')) console.log(`Logi clipboard: owner serial=${serial} foreground=${this.GetForeground().join(',')}`);
             this._traceState('clipboard ownership set');
@@ -247,7 +247,7 @@ export default class OptionsOpenBridge extends Extension {
             this._clipboardSignals.delete(source);
         }
         if (this._sourceOwner === sender && this._source) {
-            global.display.get_selection().unset_owner(Meta.SelectionType.CLIPBOARD, this._source);
+            global.display.get_selection().unset_owner(Meta.SelectionType.SELECTION_CLIPBOARD, this._source);
             this._source = this._sourceOwner = null;
         }
     }
