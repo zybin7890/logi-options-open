@@ -24,6 +24,7 @@ cleanup() {
     [[ -z "$transport_pid" ]] || wait "$transport_pid" 2>/dev/null || true
     [[ -z "$shell_pid" ]] || kill "$shell_pid" 2>/dev/null || true
     [[ -z "$shell_pid" ]] || wait "$shell_pid" 2>/dev/null || true
+    if mountpoint -q "$scratch/runtime/doc"; then fusermount3 -u "$scratch/runtime/doc" || true; fi
     # Only this invocation's freshly created private directory is removed.
     [[ "$scratch" == "${TMPDIR:-/tmp}/logi-gnome-test."* ]] && rm -rf -- "$scratch"
     exit "$status"
@@ -39,6 +40,9 @@ uuid='logi-options-open@zybin7890.github.io'
 extension_dir="$XDG_DATA_HOME/gnome-shell/extensions/$uuid"
 mkdir -p "$extension_dir" "$XDG_DATA_HOME/applications"
 cp "$source_dir/extension.js" "$source_dir/metadata.json" "$extension_dir/"
+native_dir="$(dirname -- "$executable")/linux/gnome/native"
+mkdir -p "$extension_dir/native"
+cp "$native_dir/liblogi-clipboard.so" "$native_dir/LogiClipboard-1.0.typelib" "$extension_dir/native/"
 for id in Editor Browser; do
     cat > "$XDG_DATA_HOME/applications/org.logi.test.$id.desktop" <<EOF
 [Desktop Entry]

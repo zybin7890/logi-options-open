@@ -126,7 +126,9 @@ class ForegroundCallback final : public QObject,protected QDBusContext {
 public slots:
     void UpdateForeground(const QString& app,const QString& instance,const QString& desktop,const QString& process) {
         const auto owner=QDBusConnection::sessionBus().interface()->serviceOwner("org.kde.KWin");
-        if(!calledFromDBus() || !owner.isValid() || owner.value()!=message().service())return;
+        if(!calledFromDBus() || !owner.isValid() || owner.value()!=message().service()) {
+            qWarning("Ignored foreground callback: caller=%s KWin=%s",qPrintable(message().service()),qPrintable(owner.value()));return;
+        }
         QStringList identities;
         auto add=[&](QString value){value=value.toLower();if(!value.isEmpty() && !identities.contains(value))identities.append(value);};
         add(app);add(instance);add(desktop.endsWith(".desktop")?desktop.chopped(8):desktop);
@@ -282,9 +284,14 @@ public slots:
             auto& entry=client(sender());if(entry.suspended==suspended)return;
             if(suspended){for(const auto& shortcut:entry.shortcuts)accel("setInactive",{actionId(entry,shortcut)});entry.suspended=true;entry.pending.clear();}
             else {
-                for(const auto& shortcut:entry.shortcuts) {
-                    const auto reply=accel("setShortcut",{actionId(entry,shortcut),QVariant::fromValue(QList<int>{shortcut.combined}),quint32(6)});
-                    if(qdbus_cast<QList<int>>(reply.arguments().value(0))!=QList<int>{shortcut.combined})throw std::runtime_error("A shortcut was claimed while suspended");
+                try {
+                    for(const auto& shortcut:entry.shortcuts) {
+                        const auto reply=accel("setShortcut",{actionId(entry,shortcut),QVariant::fromValue(QList<int>{shortcut.combined}),quint32(6)});
+                        if(qdbus_cast<QList<int>>(reply.arguments().value(0))!=QList<int>{shortcut.combined})throw std::runtime_error("A shortcut was claimed while suspended");
+                    }
+                } catch(...) {
+                    for(const auto& shortcut:entry.shortcuts)try{accel("setInactive",{actionId(entry,shortcut)});}catch(...){}
+                    throw;
                 }
                 entry.suspended=false;
             }

@@ -3,7 +3,7 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import GObject from 'gi://GObject';
+import GIRepository from 'gi://GIRepository';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
@@ -25,33 +25,16 @@ const XML = `<node><interface name="${NAME}">
  <signal name="ClipboardConsumed"><arg type="u"/></signal>
 </interface></node>`;
 
-// Each read returns a separate stream backed by immutable bytes. A later text
-// action cannot change a stream already handed to a native Wayland client.
-const ClipboardSource = GObject.registerClass(
-class ClipboardSource extends Meta.SelectionSource {
-    _init(text, consumed) {
-        super._init();
-        this._bytes = new GLib.Bytes(new TextEncoder().encode(text));
-        this._consumed = consumed;
-    }
-
-    vfunc_get_mimetypes() { return ['text/plain;charset=utf-8', 'text/plain', 'UTF8_STRING']; }
-
-    vfunc_read_async(_mime, cancellable, callback) {
-        const task = Gio.Task.new(this, cancellable, callback);
-        task.return_boolean(true);
-    }
-
-    vfunc_read_finish(result) {
-        result.propagate_boolean();
-        const stream = Gio.MemoryInputStream.new_from_bytes(this._bytes);
-        this._consumed?.();
-        return stream;
-    }
-});
-
 export default class OptionsOpenBridge extends Extension {
     enable() {
+        // GJS 46 cannot implement async vfuncs taking callback arguments.
+        // The small C23 helper implements MetaSelectionSource's real read path.
+        const nativePath = GLib.build_filenamev([this.path, 'native']);
+        GIRepository.Repository.prepend_search_path(nativePath);
+        GIRepository.Repository.prepend_library_path(nativePath);
+        imports.gi.versions.LogiClipboard = '1.0';
+        this._clipboard = imports.gi.LogiClipboard;
+        this._clipboardSignals = new Map();
         this._clients = new Map();
         this._actions = new Map();
         this._serial = 0;
@@ -73,6 +56,8 @@ export default class OptionsOpenBridge extends Extension {
         this._enabled = false;
         this._cancelPending();
         for (const sender of [...this._clients.keys()]) this._release(sender);
+        for (const [source, metadata] of this._clipboardSignals) source.disconnect(metadata.id);
+        this._clipboardSignals.clear();
         if (this._source) global.display.get_selection().unset_owner(Meta.SelectionType.CLIPBOARD, this._source);
         this._source = null;
         if (this._activation) global.display.disconnect(this._activation);
@@ -206,11 +191,15 @@ export default class OptionsOpenBridge extends Extension {
             this._client(sender);
             const serial = ++this._serial;
             let acknowledged = false;
-            const source = new ClipboardSource(text, () => {
+            const source = this._clipboard.Source.new(text);
+            const id = source.connect('consumed', () => {
                 if (!this._enabled || acknowledged) return;
                 acknowledged = true;
                 Gio.DBus.session.emit_signal(sender, PATH, NAME, 'ClipboardConsumed', new GLib.Variant('(u)', [serial]));
+                source.disconnect(id);
+                this._clipboardSignals.delete(source);
             });
+            this._clipboardSignals.set(source, {id, sender});
             global.display.get_selection().set_owner(Meta.SelectionType.CLIPBOARD, source);
             if (!source.is_active()) throw new Error('Compositor did not accept clipboard ownership');
             this._source = source;
@@ -245,6 +234,11 @@ export default class OptionsOpenBridge extends Extension {
         for (const binding of client.bindings.values()) this._ungrab(binding);
         if (client.watch) Gio.bus_unwatch_name(client.watch);
         this._clients.delete(sender);
+        for (const [source, metadata] of this._clipboardSignals) {
+            if (metadata.sender !== sender) continue;
+            source.disconnect(metadata.id);
+            this._clipboardSignals.delete(source);
+        }
         if (this._sourceOwner === sender && this._source) {
             global.display.get_selection().unset_owner(Meta.SelectionType.CLIPBOARD, this._source);
             this._source = this._sourceOwner = null;

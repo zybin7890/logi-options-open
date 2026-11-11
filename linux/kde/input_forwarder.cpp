@@ -28,6 +28,7 @@ int main(int argc,char** argv) {
     auto* registry=wl_display_get_registry(display);org_kde_kwin_fake_input* input{};
     static const wl_registry_listener listener{
         [](void* data,wl_registry* registry,uint32_t name,const char* interface,uint32_t version){
+            std::cout<<"Wayland global "<<interface<<" version "<<version<<'\n';
             if(std::strcmp(interface,org_kde_kwin_fake_input_interface.name)==0 && version>=4)
                 *static_cast<org_kde_kwin_fake_input**>(data)=static_cast<org_kde_kwin_fake_input*>(wl_registry_bind(registry,name,&org_kde_kwin_fake_input_interface,std::min(version,6u)));
         },[](void*,wl_registry*,uint32_t){}

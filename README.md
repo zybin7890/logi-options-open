@@ -44,7 +44,7 @@ Windows 设备验证来自本项目开发过程；不意味着所有 Logitech �
 依赖：支持 C++26 的编译器、CMake 3.30+（建议 4.1）、Ninja、hidapi-hidraw 开发包；界面需要 Qt6 Widgets。Ubuntu 24.04 示例：
 
 ```sh
-sudo apt install clang-19 ninja-build libhidapi-dev libglib2.0-dev libwayland-dev qt6-base-dev qt6-wayland libx11-dev libxtst-dev xvfb xauth openbox
+sudo apt install clang-19 ninja-build libhidapi-dev libglib2.0-dev libwayland-dev libmutter-14-dev gobject-introspection libgirepository1.0-dev qt6-base-dev qt6-wayland libx11-dev libxtst-dev xvfb xauth openbox
 python3 -m pip install --user 'cmake>=4.1,<4.2'
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel

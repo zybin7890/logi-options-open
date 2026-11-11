@@ -17,13 +17,28 @@ export WAYLAND_DISPLAY=loo-kde-wayland LIBGL_ALWAYS_SOFTWARE=1 KWIN_COMPOSE=Q
 export LOGI_WAYLAND_INPUT_READY="$session/input-ready"
 unset DISPLAY
 pids=()
+provider_pid=""
 cleanup() {
+    if [[ -n "$provider_pid" ]]; then ps -p "$provider_pid" -o pid,comm,rss,pcpu >"$evidence/kde-provider-resource-snapshot.txt" || true; fi
     for ((i=${#pids[@]}-1; i>=0; --i)); do kill "${pids[$i]}" 2>/dev/null || true; done
     for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
     # No host configuration is touched; retain the isolated config with evidence.
     cp -a "$XDG_CONFIG_HOME" "$evidence/kde-session-config" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
+
+# KWin authorizes this test-only protocol using executable identity from the
+# desktop database. Keep its grant inside the disposable session data directory.
+mkdir -p "$XDG_DATA_HOME/applications"
+cat >"$XDG_DATA_HOME/applications/org.logi.OptionsOpen.InputTest.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Logi Options Open isolated input test
+Exec=$bindir/logi-kde-input-forwarder
+NoDisplay=true
+X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input;
+EOF
+kbuildsycoca5 --noincremental >"$evidence/kde-desktop-database.log" 2>&1
 
 # Virtual KWin has no physical/logind seat. It is a real Wayland compositor;
 # the test-only forwarder transports actual uinput/evdev events to fake-input.
@@ -35,6 +50,9 @@ for ((i=0; i<200; ++i)); do [[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]] && brea
 # Only in this explicitly opted-in CI session, give the runner access to the
 # exact virtual input devices made by the test; never alter a physical keyboard.
 if [[ "${LOGI_TEST_ALLOW_DEVICE_ACL:-}" == 1 ]]; then
+    # GitHub's disposable VM includes an emulated keyboard. Complete modifier
+    # release checks require its bitmap too; this opt-in is CI-only.
+    sudo -n chmod a+r /dev/input/event*
     (
         while kill -0 "${pids[0]}" 2>/dev/null; do
             for name in /sys/class/input/event*/device/name; do
@@ -51,10 +69,18 @@ fi
 "$bindir/logi-kde-input-forwarder" >"$evidence/kde-input-transport.log" 2>&1 &
 pids+=("$!")
 "$bindir/logi-kde-provider" >"$evidence/kde-provider.log" 2>&1 &
-pids+=("$!")
+provider_pid="$!"; pids+=("$provider_pid")
+ready=0
 for ((i=0; i<200; ++i)); do
-    if dbus-send --session --type=method_call --print-reply --dest=org.logi.OptionsOpen.Desktop1 /org/logi/OptionsOpen/Desktop1 org.logi.OptionsOpen.Desktop1.GetCapabilities >"$evidence/kde-capabilities.log" 2>&1; then break; fi
+    if dbus-send --session --type=method_call --print-reply --dest=org.logi.OptionsOpen.Desktop1 /org/logi/OptionsOpen/Desktop1 org.logi.OptionsOpen.Desktop1.GetCapabilities >"$evidence/kde-capabilities.log" 2>&1; then
+        # Foreground becomes available only after the loaded KWin script reports
+        # its first native snapshot. Keyboard capability can be false here: the
+        # driver creates the real uinput keyboard after this provider handshake.
+        if grep -A1 'string "foreground"' "$evidence/kde-capabilities.log" | grep -q 'boolean true' &&
+           grep -A1 'string "clipboard"' "$evidence/kde-capabilities.log" | grep -q 'boolean true'; then ready=1; break; fi
+    fi
     kill -0 "${pids[-1]}"; sleep 0.05
 done
+[[ "$ready" == 1 ]] || { cat "$evidence/kde-capabilities.log" "$evidence/kde-provider.log"; exit 1; }
 "$driver" 2>&1 | tee "$evidence/kde-wayland-test.log"
 "$bindir/logi-linux-gui-tests" 2>&1 | tee "$evidence/kde-gui-test.log"

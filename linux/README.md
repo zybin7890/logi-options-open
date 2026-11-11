@@ -11,7 +11,7 @@ Dependencies: CMake 3.30+, a C++26-capable compiler (CI uses Clang 19), pkg-conf
 libhidapi-dev, GLib/GIO, libwayland and Qt 6 Widgets/DBus development files. For Ubuntu:
 
 ```sh
-sudo apt install clang-19 libhidapi-dev libglib2.0-dev libwayland-dev pkg-config qt6-base-dev qt6-wayland libx11-dev libxtst-dev xvfb xauth openbox
+sudo apt install clang-19 libhidapi-dev libglib2.0-dev libwayland-dev libmutter-14-dev gobject-introspection libgirepository1.0-dev pkg-config qt6-base-dev qt6-wayland libx11-dev libxtst-dev xvfb xauth openbox
 cmake -S . -B build -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 xvfb-run -a sh tests/run-linux-desktop-tests.sh build

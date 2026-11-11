@@ -11,7 +11,7 @@ There is no Xwayland fallback for native Wayland desktop integration.
 
 ## Install as your normal desktop user
 
-From the source tree or the installed `share/logi-options-open/gnome` directory:
+From the built package's `share/logi-options-open/gnome` directory:
 
 ```sh
 bash install.sh --install
@@ -25,6 +25,25 @@ unknown, log out and back in once, then run `--enable`. It is copied only to
 (default `~/.local/share/...`). The application checks the live D-Bus service;
 an installed directory alone is not treated as a working compositor connection.
 Mouse hidraw/uinput permissions are separate from extension installation.
+
+The directory includes a small C23 clipboard helper (`native/liblogi-clipboard.so`
+and `native/LogiClipboard-1.0.typelib`). GNOME 46's JavaScript runtime cannot
+override an asynchronous callback vfunc, so the helper implements Mutter's real
+selection read path. `install.sh` refuses installation without these files.
+They load from the extension's own directory without a system library install.
+After upgrading the native helper, log out and back in so GNOME loads the new
+library instead of its previously loaded copy.
+
+For a source build, install `libmutter-14-dev`, `gobject-introspection` and
+`libgirepository1.0-dev` in addition to the project's normal build dependencies,
+then stage a complete user-installable directory:
+
+```sh
+cmake -S . -B build -DLOGI_BUILD_GNOME_BRIDGE=ON
+cmake --build build
+cmake --install build --prefix "$PWD/build/stage"
+bash build/stage/share/logi-options-open/gnome/install.sh --install
+```
 
 Disable using the GNOME Extensions application or:
 

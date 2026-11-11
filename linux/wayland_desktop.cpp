@@ -68,6 +68,8 @@ struct WaylandDesktop::Impl {
     std::set<unsigned> consumed;
     Clock::time_point paste_deadline{};
     std::string pending_error;
+    std::vector<std::string> foreground_cache;
+    bool foreground_snapshot{};
     explicit Impl(KeyEmitter callback):emit(std::move(callback)) {
         g_main_context_push_thread_default(context);
         GError* error{};char* address=g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SESSION,nullptr,&error);
@@ -126,6 +128,7 @@ struct WaylandDesktop::Impl {
         try {
             const bool in_use=self.registered || self.paste_serial || !self.texts.empty();
             self.triggered.clear();self.consumed.clear();self.paste_serial=0;self.texts.clear();
+            self.foreground_cache.clear();self.foreground_snapshot=false;
             self.refresh();
             if(in_use)self.pending_error="Native compositor bridge restarted/disconnected; reload configuration to restore desktop integration";
             self.registered=false;
@@ -138,6 +141,10 @@ struct WaylandDesktop::Impl {
             if(!self.suspended && self.triggers.contains(token) && self.triggered.size()<128)self.triggered.emplace_back(token);
         }else if(std::string_view(name)=="ClipboardConsumed" && g_variant_is_of_type(values,G_VARIANT_TYPE("(u)"))) {
             guint32 serial{};g_variant_get(values,"(u)",&serial);if(self.consumed.size()<128)self.consumed.insert(serial);
+        }else if(std::string_view(name)=="ForegroundChanged" && g_variant_is_of_type(values,G_VARIANT_TYPE("(as)"))) {
+            gchar** identities{};g_variant_get(values,"(^as)",&identities);self.foreground_cache.clear();
+            for(auto item=identities;item && *item;++item){auto value=normalized(*item);if(!value.empty() && std::ranges::find(self.foreground_cache,value)==self.foreground_cache.end())self.foreground_cache.push_back(std::move(value));}
+            g_strfreev(identities);
         }
     }
     void pump(){for(unsigned n=0;n<128 && g_main_context_pending(context);++n)g_main_context_iteration(context,FALSE);}
@@ -159,10 +166,11 @@ std::string WaylandDesktop::status_json()const {
 std::vector<std::string> WaylandDesktop::foreground() {
     auto& w=*impl_;w.pump();
     if(!available() || !w.profiles){if(w.profiles_required)throw std::runtime_error("Native desktop bridge no longer provides required foreground identities");return {};}
+    if(w.foreground_snapshot)return w.foreground_cache;
     auto reply=w.call("GetForeground",nullptr,G_VARIANT_TYPE("(as)"));gchar** values{};g_variant_get(reply.get(),"(^as)",&values);
     std::vector<std::string> result;
     for(auto item=values;item && *item;++item){auto identity=normalized(*item);if(!identity.empty() && std::ranges::find(result,identity)==result.end())result.push_back(std::move(identity));}
-    g_strfreev(values);return result;
+    g_strfreev(values);w.foreground_cache=result;w.foreground_snapshot=true;return result;
 }
 void WaylandDesktop::validate(const Config& config)const {
     const auto& w=*impl_;const bool text=needs_text(config);
