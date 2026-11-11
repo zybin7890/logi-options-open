@@ -65,6 +65,14 @@ if(LOGI_BUILD_GUI)
         if(EXISTS "${LOGI_QT_PREFIX}/share/licenses/qt6-base")
             install(DIRECTORY "${LOGI_QT_PREFIX}/share/licenses/qt6-base/" DESTINATION licenses/qt6-base)
         endif()
+        # Qt's deployment identifies plugins but MSYS2 Qt does not bundle all
+        # their MinGW/third-party imports. Resolve the installed PE graph too.
+        get_filename_component(LOGI_COMPILER_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        get_filename_component(LOGI_MSYS_ROOT "${LOGI_QT_PREFIX}" DIRECTORY)
+        find_program(LOGI_PACMAN pacman HINTS "${LOGI_MSYS_ROOT}/usr/bin")
+        configure_file(cmake/WindowsRuntimeDependencies.cmake.in
+            "${CMAKE_CURRENT_BINARY_DIR}/WindowsRuntimeDependencies.cmake" @ONLY)
+        install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/WindowsRuntimeDependencies.cmake")
     endif()
     if(BUILD_TESTING)
         find_package(Qt6 REQUIRED COMPONENTS Test)

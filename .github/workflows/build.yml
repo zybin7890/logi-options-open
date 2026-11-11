@@ -107,6 +107,19 @@ jobs:
           path: build/test-evidence/
       - name: Package
         run: cd build && cpack
+      - name: Extracted Windows package without SDK PATH
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem -LiteralPath build -Filter 'logi-options-open-*.zip')
+          if ($archives.Count -ne 1) { throw 'Expected exactly one Windows package' }
+          ./cmake/SmokeWindowsPackage.ps1 -Archive $archives[0].FullName -EvidenceDirectory build/package-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-portable-package-evidence
+          path: |
+            build/package-evidence/*.log
+            build/package-evidence/*.json
       - uses: actions/upload-artifact@v4
         with:
           name: logi-options-open-windows-x64

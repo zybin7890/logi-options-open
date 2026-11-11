@@ -13,18 +13,18 @@
 | 原生设置界面 | 共用 Qt6 Widgets 源码 | 共用 Qt6 Widgets 源码 |
 | 电量、DPI、SmartShift、滚轮参数 | 已实现；MX Master 3S + Bolt 本机验证 | 已移植；需要 Linux 实机验收 |
 | 全局按键、拇指滚轮、四向手势 | 已实现；本机验证 | hidapi + uinput 后端；需要实机验收 |
-| 应用专属配置、全局快捷键 | 已实现 | X11；原生 GNOME/KDE Wayland 支持在验证分支开发，验收前不发布 |
+| 应用专属配置、全局快捷键 | 已实现 | X11；原生 GNOME/KDE Wayland 已通过实际桌面交互测试，鼠标硬件待验收 |
 | Smart Actions、Actions Ring | 已实现部分功能 | 结构化动作编辑、序列、原生环形菜单与子目录；原生剪贴板文本输入 |
 | HTTP API / MCP stdio / CLI | 已提供 | 已适配支持的 Linux 命令 |
 | Flow、配对、固件更新、完整官方插件兼容 | 未实现 | 未实现 |
 
-Windows 设备验证来自本项目开发过程；不意味着所有 Logitech 设备均兼容。Linux 的桌面/内核输入测试不等于鼠标硬件测试。Wayland 的应用识别、全局快捷键和 Text 输入通过原生 GNOME/KDE 桌面桥接实现，详见 [Linux 说明](linux/README.md#native-wayland-integration)。未启用对应桥接或缺少能力时明确拒绝相关配置，不用 Xwayland 冒充支持。当前分支新增部分需通过真实桌面验收后才发布。不要同时让 Solaar、logid 和本项目修改同一设备。
+Windows 设备验证来自本项目开发过程；不意味着所有 Logitech 设备均兼容。Linux 的桌面/内核输入测试不等于鼠标硬件测试。Wayland 的应用识别、全局快捷键和 Text 输入通过原生 GNOME/KDE 桌面桥接实现，详见 [Linux 说明](linux/README.md#native-wayland-integration)。未启用对应桥接或缺少能力时明确拒绝相关配置，不用 Xwayland 冒充支持。[2026-11-11 验证记录](https://github.com/zybin7890/logi-options-open/actions/runs/43040247340)包含真实 GNOME/KDE Wayland 会话中的应用识别、快捷键释放顺序、Unicode 与连续文本输入、共享界面编辑以及 Ring 键盘焦点测试；测试没有连接物理鼠标。不要同时让 Solaar、logid 和本项目修改同一设备。
 
 ## Windows
 
 使用发行包，解压到可写目录后运行 `logi-native.exe`。本项目独立访问设备，不需要安装原版 Options+。首次确认使用提示后启动后台；若原版正在运行，会临时暂停其界面和 Agent，避免同时接管鼠标。关闭设置窗口后，后台继续运行；在设置中停止试用或执行 `logi-cli.exe stop`，恢复标准设备上报，并仅在原版仍存在且曾被本项目暂停时恢复原版 Agent。不会安装原版、禁用原版服务或安装开机启动。
 
-配置在程序旁的 `mappings.ini`。普通设置立即写入/热更新，无需点击“应用”。如需复用旧配置，自行复制其内容；仓库和发行包仅带通用示例，未包含开发者个人应用路径。
+配置在程序旁的 `mappings.ini`。普通设置立即写入/热更新，无需点击“应用”。使用 `logi-native.exe --config "旧配置的完整路径"` 可以直接复用正在运行的后台配置，无需复制；仓库和发行包仅带通用示例，未包含开发者个人应用路径。两端界面均支持 `--config`，也可通过 `LOGI_OPTIONS_OPEN_CONFIG` 指定配置。
 
 ```powershell
 .\logi-cli.exe disclaimer
