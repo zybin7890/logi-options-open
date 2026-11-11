@@ -26,6 +26,11 @@ at runtime; these are not redistributed as project assets.
 - Linux links the system HIDAPI hidraw library. HIDAPI offers GPLv3, BSD-style,
   or its original license at the user's choice. It is not vendored here; see
   <https://github.com/libusb/hidapi/blob/master/LICENSE.txt> for its terms.
+- X11 desktop integration dynamically links the system libX11 and libXtst.
+  They are external dependencies, not vendored or relicensed here. Their
+  upstream notices are maintained by the X.Org projects at
+  <https://gitlab.freedesktop.org/xorg/lib/libx11> and
+  <https://gitlab.freedesktop.org/xorg/lib/libxtst>.
 - Windows builds link Windows SDK system libraries, including HID, SetupAPI,
   GDI+ and the native controls API. These are supplied by Windows, not relicensed
   under this project's MIT license.

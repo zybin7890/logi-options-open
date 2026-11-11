@@ -29,7 +29,7 @@ class BridgeTests(unittest.TestCase):
         with patch.object(bridge, "WINDOWS", False), patch.object(bridge, "cli", side_effect=cli), \
                 patch.object(bridge, "launch", return_value={"pid": 1}) as launch:
             self.assertEqual(bridge.perform("start", {"takeover": True}), {"pid": 1})
-            launch.assert_called_once_with("run", bridge.CONFIG, log=True)
+            launch.assert_called_once_with("run", bridge.CONFIG, log=True, wait_ready=True)
 
     def test_unacknowledged_start_never_launches(self):
         def cli(command, *_args, **_kwargs):

@@ -10,14 +10,25 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-19 ninja-build libhidapi-dev qt6-base-dev libgl1-mesa-dev
+          sudo apt-get install -y clang-19 ninja-build libhidapi-dev qt6-base-dev libgl1-mesa-dev libx11-dev libxtst-dev xvfb xauth openbox
           python3 -m pip install 'cmake>=4.1,<4.2'
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel 2
-      - name: Test without hardware
-        run: ctest --test-dir build --output-on-failure
+      - name: Real desktop and process behavior (simulated HID)
+        run: xvfb-run -a -s '-screen 0 1280x900x24' sh tests/run-linux-desktop-tests.sh build
+      - name: Real kernel uinput events (not physical mouse)
+        run: |
+          sudo modprobe uinput
+          sudo ctest --test-dir build -R linux-uinput-kernel --output-on-failure -V
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-behavior-evidence
+          path: |
+            build/Testing/Temporary/*.log
+            build/test-evidence/
       - name: Package
         run: cd build && cpack
       - uses: actions/upload-artifact@v4

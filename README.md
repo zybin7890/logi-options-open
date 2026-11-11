@@ -13,11 +13,12 @@
 | 原生设置界面 | Win32 | Qt6 Widgets |
 | 电量、DPI、SmartShift、滚轮参数 | 已实现；MX Master 3S + Bolt 本机验证 | 已移植；需要 Linux 实机验收 |
 | 全局按键、拇指滚轮、四向手势 | 已实现；本机验证 | hidapi + uinput 后端；需要实机验收 |
-| 应用专属配置、Smart Actions、Actions Ring | 已实现部分功能 | 尚未支持；不会静默当作成功 |
+| 应用专属配置、全局快捷键 | 已实现 | X11 前台应用匹配与快捷键；Wayland 尚未支持 |
+| Smart Actions、Actions Ring | 已实现部分功能 | 结构化动作编辑、序列、原生环形菜单与子目录；文本输入限 X11 |
 | HTTP API / MCP stdio / CLI | 已提供 | 已适配支持的 Linux 命令 |
 | Flow、配对、固件更新、完整官方插件兼容 | 未实现 | 未实现 |
 
-Windows 设备验证来自本项目开发过程；不意味着所有 Logitech 设备均兼容。Linux 的 CI/离线测试不等于鼠标硬件测试。Wayland 可使用 uinput 注入，但桌面快捷键取决于桌面环境；应用识别和全局热键监听不在当前 Linux 支持范围内。不要同时让 Solaar、logid 和本项目修改同一设备。
+Windows 设备验证来自本项目开发过程；不意味着所有 Logitech 设备均兼容。Linux 的桌面/内核输入测试不等于鼠标硬件测试。Wayland 可使用基础 uinput 映射，但桌面快捷键取决于桌面环境；应用识别、全局快捷键监听、Text 输入目前仅支持 X11，检测到 Wayland/Xwayland 时明确拒绝这些配置。不要同时让 Solaar、logid 和本项目修改同一设备。
 
 ## Windows
 
@@ -43,11 +44,11 @@ Windows 设备验证来自本项目开发过程；不意味着所有 Logitech �
 依赖：支持 C++26 的编译器、CMake 3.30+（建议 4.1）、Ninja、hidapi-hidraw 开发包；界面需要 Qt6 Widgets。Ubuntu 24.04 示例：
 
 ```sh
-sudo apt install clang-19 ninja-build libhidapi-dev qt6-base-dev
+sudo apt install clang-19 ninja-build libhidapi-dev qt6-base-dev libx11-dev libxtst-dev xvfb xauth openbox
 python3 -m pip install --user 'cmake>=4.1,<4.2'
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+xvfb-run -a sh tests/run-linux-desktop-tests.sh build
 ./build/logi-options-open
 ```
 
@@ -88,7 +89,9 @@ HTTP 只监听 `127.0.0.1`，需要启动时输出的随机 Bearer token。MCP �
 | POST `/v1/agent/stop` | 停止后台并恢复本次转发 |
 | POST `/v1/switch-host` | `{"slot":2}`，需要已配对且停止改键 |
 
-Linux 未实现的 Ring / 动作预览返回明确错误。首次确认记录仅存本机用户配置目录，不上传数据；只有删除该记录或换用另一个系统账户才需要重新确认。
+`POST /v1/actions/preview` 接收 `{"sequence":"Ctrl+C;Wait(100);Ctrl+V"}`；Linux 后台返回 `accepted` 和 `action_id` 表示已入队，不能当作已完成。查询 `/v1/agent` 的 `pending_actions`、`last_completed_action`、`last_action_error` 观察执行。`POST /v1/ring/preview` 打开原生环形菜单。MCP 写入模式也提供这两项工具。
+
+Linux 后台独占 HID，CLI/API 的设置与重载通过本地 IPC 等待确认；断线时 `ready:false`，后台尝试恢复连接。首次确认记录仅存本机用户配置目录，不上传数据；只有删除该记录或换用另一个系统账户才需要重新确认。
 
 ## 构建与验证
 
@@ -101,7 +104,7 @@ ctest --test-dir build --output-on-failure
 cd build && cpack
 ```
 
-CI 分别构建 Windows 和 Linux，并执行无需设备的测试。Linux GUI 使用 Qt offscreen 验证；它不访问真实鼠标，也不证明所有桌面/显示器上的布局正确。
+CI 分别构建 Windows 和 Linux。Linux 验收包括 Xvfb/Openbox 下的真实窗口/键盘/粘贴、Qt 鼠标键盘交互和配置落盘、生产后台循环的模拟设备测试、跨进程 CLI/HTTP/MCP，以及生产 uinput 输出到内核 evdev 的事件测试。内核输入不可用时不能计为通过；模拟 HID 不等于真实 MX Master 3S。界面截图与测试日志随 CI 上传。
 
 ## 资源与许可
 

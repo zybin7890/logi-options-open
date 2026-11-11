@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
@@ -23,7 +24,7 @@ LOG = CONFIG.parent / "agent.log"
 CREATE_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if WINDOWS else 0
 SETTINGS = ("dpi", "smartshift", "ratchet", "hires", "invert", "thumb-invert")
 LOCK = threading.Lock()
-NAME = {"name": "logi-options-open", "version": "0.1.0-alpha.1"}
+NAME = {"name": "logi-options-open", "version": "0.1.0-alpha.2"}
 LEGACY = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 MODERN = "2026-07-28"
 
@@ -49,7 +50,7 @@ def cli(*args, structured=False):
     return json.loads(result.stdout) if structured else result.stdout.strip()
 
 
-def launch(*args, log=False):
+def launch(*args, log=False, wait_ready=False):
     try:
         kwargs = {"cwd": ROOT, "creationflags": CREATE_FLAGS,
                   "stdin": subprocess.DEVNULL}
@@ -63,6 +64,18 @@ def launch(*args, log=False):
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
     except OSError as error:
         raise BridgeError(str(error), 503) from error
+    if wait_ready:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                detail = LOG.read_text(encoding="utf-8", errors="replace")[-2048:] if log and LOG.exists() else ""
+                raise BridgeError("Backend exited before becoming ready. " + detail, 503)
+            state = cli("agent-status", structured=True)
+            if state.get("ready"):
+                return {"pid": process.pid, "ready": True, "connected": True}
+            time.sleep(0.1)
+        return {"pid": process.pid, "ready": False, "connected": False,
+                "state": "Background process started; device is not ready. Inspect agent status/log."}
     return {"pid": process.pid}
 
 
@@ -100,17 +113,20 @@ def write_config(args):
     # that saving failed, or roll back a file the running agent may already read.
     try:
         notification = cli("reload", CONFIG, structured=True)
-        if (type(notification) is not dict or notification.keys() != {"reload_requested"}
+        if (type(notification) is not dict or "reload_requested" not in notification
                 or type(notification["reload_requested"]) is not bool):
             raise BridgeError("Invalid reload response.", 503)
+        if not WINDOWS and notification.get("reloaded") is not True:
+            raise BridgeError("Linux daemon did not confirm the new configuration was applied.", 503)
     except (BridgeError, ValueError) as error:
         return {"saved": True, "reload_requested": False, "reload_error": str(error)}
-    return {"saved": True, "reload_requested": notification["reload_requested"]}
+    result = {"saved": True, "reload_requested": notification["reload_requested"]}
+    if not WINDOWS:
+        result["reloaded"] = True
+    return result
 
 
 def preview_actions(args):
-    if not WINDOWS:
-        raise BridgeError("Action previews are not supported by the Linux backend yet.", 501)
     require_keys(args, "sequence")
     sequence = args["sequence"]
     if type(sequence) is not str or not sequence or "\r" in sequence or "\n" in sequence:
@@ -121,6 +137,12 @@ def preview_actions(args):
     try:
         cli("check-actions", path)
         cli("check-disclaimer")
+        if not WINDOWS:
+            # The Linux daemon acknowledges the queue; completion/errors are in agent-status.
+            try:
+                return cli("play-actions", path, structured=True)
+            finally:
+                path.unlink(missing_ok=True)
         process = subprocess.Popen([str(EXE), "play-actions", str(path)], cwd=ROOT,
                                    creationflags=CREATE_FLAGS,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -168,7 +190,8 @@ def perform(operation, args=None):
                 raise BridgeError("LogiNative is already active.", 409)
             cli("check-config", CONFIG)
             cli("check-disclaimer")
-            return launch("run-preview" if WINDOWS and args["takeover"] else "run", CONFIG, log=True)
+            return launch("run-preview" if WINDOWS and args["takeover"] else "run", CONFIG,
+                          log=True, wait_ready=not WINDOWS)
         if operation == "stop":
             require_keys(args)
             cli("stop")
@@ -176,7 +199,8 @@ def perform(operation, args=None):
         if operation == "ring":
             require_keys(args)
             if not WINDOWS:
-                raise BridgeError("Actions Ring is not supported by the Linux backend yet.", 501)
+                cli("check-disclaimer")
+                return {"result": cli("preview-ring", CONFIG)}
             return launch("preview-ring", CONFIG)
         if operation == "preview-actions":
             return preview_actions(args)
@@ -264,6 +288,9 @@ TOOLS = dict((spec["name"], (operation, spec)) for operation, spec in (
     tool("stop_native_agent", "stop", "Stop the local agent and restore Options+ if paused.", read_only=False),
     tool("switch_easy_switch_slot", "switch", "Request an already paired host. Requires both agents to be stopped.",
          {"slot": {"type": "integer", "minimum": 1}}, False),
+    tool("preview_actions", "preview-actions", "Run an action sequence. Linux acknowledges queuing; inspect agent_status for completion/errors.",
+         {"sequence": {"type": "string"}}, False),
+    tool("show_actions_ring", "ring", "Open the native Actions Ring using the local configuration.", read_only=False),
 ))
 
 

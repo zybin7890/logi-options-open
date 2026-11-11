@@ -1,4 +1,5 @@
 #include "../first_run.hpp"
+#include "ring_ui.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -13,6 +14,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
+#include <QKeySequenceEdit>
+#include <QTableWidget>
+#include <QHeaderView>
 #include <QMainWindow>
 #include <QMap>
 #include <QMessageBox>
@@ -26,10 +31,15 @@
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QTimer>
 #include <QVBoxLayout>
+#ifdef LOGI_GUI_TEST
+#include <QtTest/QTest>
+#include <QElapsedTimer>
+#endif
 
 #include <algorithm>
 #include <deque>
@@ -60,13 +70,13 @@ QString readFile(const QString& path) {
     return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString{};
 }
 
-QMap<QString, QString> globalBindings(const QString& text) {
+QMap<QString, QString> globalBindings(const QString& text, const QString& section = QStringLiteral("global")) {
     QMap<QString, QString> result;
     bool global = false;
     for (const auto& line : text.split('\n')) {
         const auto trimmed = line.trimmed();
         if (trimmed.startsWith('[')) {
-            global = trimmed.compare(QStringLiteral("[global]"), Qt::CaseInsensitive) == 0;
+            global = trimmed.compare('[' + section + ']', Qt::CaseInsensitive) == 0;
             continue;
         }
         if (!global || trimmed.startsWith('#') || trimmed.startsWith(';')) continue;
@@ -76,19 +86,20 @@ QMap<QString, QString> globalBindings(const QString& text) {
     return result;
 }
 
-QString replaceGlobalBinding(const QString& source, const QString& key, const QString& value) {
+QString replaceGlobalBinding(const QString& source, const QString& key, const QString& value,
+                             const QString& section = QStringLiteral("global")) {
     auto lines = source.split('\n');
     int begin = -1, end = static_cast<int>(lines.size());
     for (int i = 0; i < lines.size(); ++i) {
         const auto trimmed = lines[i].trimmed();
         if (!trimmed.startsWith('[')) continue;
         if (begin >= 0) { end = i; break; }
-        if (trimmed.compare(QStringLiteral("[global]"), Qt::CaseInsensitive) == 0) begin = i;
+        if (trimmed.compare('[' + section + ']', Qt::CaseInsensitive) == 0) begin = i;
     }
     const auto replacement = key + QStringLiteral(" = ") + value;
     if (begin < 0) {
         if (!lines.isEmpty() && lines.back().isEmpty()) lines.removeLast();
-        lines << QStringLiteral("[global]") << replacement << QString{};
+        lines << ('[' + section + ']') << replacement << QString{};
     } else {
         for (int i = begin + 1; i < end; ++i) {
             const auto equal = lines[i].indexOf('=');
@@ -109,6 +120,17 @@ bool writeFile(const QString& path, const QByteArray& data) {
     return file.write(data) == data.size() && file.commit();
 }
 
+QStringList splitActions(const QString& sequence) {
+    QStringList result; int depth = 0, begin = 0;
+    for (int i = 0; i < sequence.size(); ++i) {
+        if (sequence[i] == '(') ++depth;
+        else if (sequence[i] == ')') --depth;
+        else if (sequence[i] == ';' && depth == 0) { result << sequence.mid(begin, i-begin); begin = i+1; }
+    }
+    if (begin < sequence.size()) result << sequence.mid(begin);
+    return result;
+}
+
 struct Task {
     QString key;
     QStringList arguments;
@@ -117,7 +139,7 @@ struct Task {
 
 class Window : public QMainWindow {
 public:
-    explicit Window(QString config, bool runtime = true)
+    explicit Window(QString config, bool runtime = true, bool refreshOnOpen = true)
         : config_(std::move(config)), runtime_(runtime) {
         setWindowTitle(QString::fromLatin1(title));
         resize(960, 740);
@@ -140,10 +162,24 @@ public:
         auto* note = new QLabel(QStringLiteral("Third-party experimental software · Linux preview"), central);
         note->setStyleSheet(QStringLiteral("color:#b6bebd"));
         layout->addWidget(note);
+        auto* profiles = new QHBoxLayout;
+        profiles->addWidget(new QLabel(QStringLiteral("Application profile"), central));
+        profile_ = new QComboBox(central); profile_->setObjectName(QStringLiteral("profile"));
+        profile_->addItem(QStringLiteral("Global"), QStringLiteral("global"));
+        profiles->addWidget(profile_, 1);
+        profileName_ = new QLineEdit(central); profileName_->setObjectName(QStringLiteral("profileName"));
+        profileName_->setPlaceholderText(QStringLiteral("App executable / WM_CLASS, e.g. firefox"));
+        profiles->addWidget(profileName_, 2);
+        auto* addProfile = new QPushButton(QStringLiteral("Add profile"), central);
+        addProfile->setObjectName(QStringLiteral("addProfile")); profiles->addWidget(addProfile);
+        layout->addLayout(profiles);
         auto* tabs = new QTabWidget(central);
+        tabs->setObjectName(QStringLiteral("pages"));
         layout->addWidget(tabs, 1);
         tabs->addTab(settingsPage(), QStringLiteral("Point & scroll"));
         tabs->addTab(mappingsPage(), QStringLiteral("Buttons & gestures"));
+        tabs->addTab(smartPage(), QStringLiteral("Smart Actions"));
+        tabs->addTab(ringPage(), QStringLiteral("Actions Ring"));
         tabs->addTab(advancedPage(), QStringLiteral("Configuration"));
         auto* footer = new QHBoxLayout;
         agent_ = new QLabel(QStringLiteral("Backend status not read"), central);
@@ -154,10 +190,25 @@ public:
         footer->addWidget(stop_);
         layout->addLayout(footer);
         status_ = new QLabel(central);
+        status_->setObjectName(QStringLiteral("statusMessage"));
         status_->setWordWrap(true);
         status_->setMinimumHeight(44);
         layout->addWidget(status_);
         setCentralWidget(central);
+        connect(profile_, &QComboBox::currentIndexChanged, this, [this] { if (!loading_) setEditors(draft_); });
+        connect(addProfile, &QPushButton::clicked, this, [this] {
+            const auto name = profileName_->text().trimmed().toLower();
+            if (name.isEmpty() || name.contains('[') || name.contains(']') || name.contains('\n') ||
+                name == QStringLiteral("hotkeys") || name == QStringLiteral("ring") || name.startsWith(QStringLiteral("ring/"))) {
+                message(QStringLiteral("Enter an application executable name or WM_CLASS."), true); return;
+            }
+            int index = profile_->findData(name);
+            if (index < 0) {
+                draft_ += QStringLiteral("\n[") + name + QStringLiteral("]\n");
+                const QSignalBlocker block(profile_); profile_->addItem(name, name); index = profile_->count() - 1;
+            }
+            profile_->setCurrentIndex(index); profileName_->clear(); setEditors(draft_); scheduleSave();
+        });
         setStyleSheet(QStringLiteral(
             "QMainWindow,QWidget{background:#1b1d1d;color:#eeeeee;font-size:14px;}"
             "QTabWidget::pane,QGroupBox{border:1px solid #3b4040;border-radius:8px;}"
@@ -213,7 +264,7 @@ public:
         }
         draft_ = data;
         setEditors(data);
-        if (runtime_) QTimer::singleShot(0, this, [this] { refreshAll(); });
+        if (runtime_ && refreshOnOpen) QTimer::singleShot(0, this, [this] { refreshAll(); });
     }
 
     void applyStatus(const QJsonObject& object) {
@@ -336,24 +387,206 @@ private:
         for (const auto& pair : controls) {
             auto* choice = new QComboBox(page);
             choice->setEditable(true);
+            choice->setObjectName(QStringLiteral("binding_") + pair.first.toLower());
             choice->addItems(suggestions);
             bindings_.insert(pair.first.toLower(), choice);
             form->addRow(pair.second, choice);
             connect(choice, &QComboBox::currentTextChanged, this, [this, key = pair.first](const QString& value) {
                 if (loading_) return;
-                draft_ = replaceGlobalBinding(draft_, key, value);
+                draft_ = replaceGlobalBinding(draft_, key, value, profile_->currentData().toString());
                 const QSignalBlocker block(advanced_);
                 advanced_->setPlainText(draft_);
                 scheduleSave();
             });
         }
         auto* help = new QLabel(QStringLiteral("Mappings are validated and saved automatically.\n"
-            "Linux preview currently uses global mappings. Desktop shortcuts depend on your compositor.\n"
-            "Application profiles, global hotkey triggers, Actions Ring and Flow are not implemented on Linux."), page);
+            "Application overrides inherit missing mappings from Global. X11 foreground detection selects the profile.\n"
+            "Desktop shortcuts depend on your compositor; Wayland application detection and Flow are not supported."), page);
         help->setWordWrap(true);
         form->addRow(help);
         scroll->setWidget(page);
         return scroll;
+    }
+
+    QString smartSection() const {
+        return trigger_->currentData().toString() == QStringLiteral("hotkey")
+            ? QStringLiteral("hotkeys") : profile_->currentData().toString();
+    }
+
+    QString smartKey() const {
+        if (trigger_->currentData().toString() != QStringLiteral("hotkey")) return trigger_->currentData().toString();
+        auto key = hotkey_->keySequence().toString(QKeySequence::PortableText);
+        return key.replace(QStringLiteral("Meta"), QStringLiteral("Super"));
+    }
+
+    QWidget* smartPage() {
+        auto* page = new QWidget;
+        auto* layout = new QVBoxLayout(page);
+        auto* form = new QFormLayout;
+        trigger_ = new QComboBox(page); trigger_->setObjectName(QStringLiteral("smartTrigger"));
+        const QList<QPair<QString, QString>> triggers{
+            {QStringLiteral("Middle button"), QStringLiteral("0052")}, {QStringLiteral("Back button"), QStringLiteral("0053")},
+            {QStringLiteral("Forward button"), QStringLiteral("0056")}, {QStringLiteral("Top button"), QStringLiteral("00c4")},
+            {QStringLiteral("Gesture click"), QStringLiteral("00c3")}, {QStringLiteral("Gesture left"), QStringLiteral("00c3.left")},
+            {QStringLiteral("Gesture right"), QStringLiteral("00c3.right")}, {QStringLiteral("Global shortcut (X11)"), QStringLiteral("hotkey")}};
+        for (const auto& pair : triggers) trigger_->addItem(pair.first, pair.second);
+        form->addRow(QStringLiteral("When"), trigger_);
+        hotkey_ = new QKeySequenceEdit(page); hotkey_->setObjectName(QStringLiteral("smartHotkey"));
+        hotkey_->setKeySequence(QKeySequence(QStringLiteral("Ctrl+Alt+F10"))); hotkey_->setEnabled(false);
+        form->addRow(QStringLiteral("Shortcut trigger"), hotkey_);
+        layout->addLayout(form);
+        steps_ = new QTableWidget(0, 2, page); steps_->setObjectName(QStringLiteral("smartSteps"));
+        steps_->setHorizontalHeaderLabels({QStringLiteral("Then"), QStringLiteral("Value")});
+        steps_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        steps_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+        steps_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        layout->addWidget(steps_, 1);
+        auto* buttons = new QHBoxLayout;
+        auto* add = new QPushButton(QStringLiteral("Add step"), page); add->setObjectName(QStringLiteral("addStep"));
+        auto* remove = new QPushButton(QStringLiteral("Remove step"), page); remove->setObjectName(QStringLiteral("removeStep"));
+        auto* up = new QPushButton(QStringLiteral("Move up"), page); up->setObjectName(QStringLiteral("stepUp"));
+        auto* down = new QPushButton(QStringLiteral("Move down"), page); down->setObjectName(QStringLiteral("stepDown"));
+        auto* play = new QPushButton(QStringLiteral("Try sequence"), page); play->setObjectName(QStringLiteral("trySequence"));
+        for (auto* button : {add, remove, up, down, play}) buttons->addWidget(button);
+        layout->addLayout(buttons);
+        auto* help = new QLabel(QStringLiteral("Changes save automatically to the selected trigger. Choose an action type for each step.\n"
+            "Try sequence executes real input against the focused application; the backend must have input permission."), page);
+        help->setWordWrap(true); layout->addWidget(help);
+        connect(trigger_, &QComboBox::currentIndexChanged, this, [this] { if (!loading_) loadSmart(); });
+        connect(hotkey_, &QKeySequenceEdit::keySequenceChanged, this, [this] { if (!loading_) loadSmart(); });
+        connect(add, &QPushButton::clicked, this, [this] {
+            addStep(QStringLiteral("Wait"), QStringLiteral("100")); steps_->selectRow(steps_->rowCount()-1); updateSmart();
+        });
+        connect(remove, &QPushButton::clicked, this, [this] {
+            if (steps_->currentRow() >= 0) { steps_->removeRow(steps_->currentRow()); updateSmart(); }
+        });
+        connect(up, &QPushButton::clicked, this, [this] { moveStep(-1); });
+        connect(down, &QPushButton::clicked, this, [this] { moveStep(1); });
+        connect(play, &QPushButton::clicked, this, [this] { playSequence(smartSequence()); });
+        return page;
+    }
+
+    void addStep(const QString& type, const QString& value) {
+        const int row = steps_->rowCount(); steps_->insertRow(row);
+        auto* choice = new QComboBox(steps_);
+        choice->addItems({QStringLiteral("Shortcut"), QStringLiteral("Wait"), QStringLiteral("Text"),
+            QStringLiteral("Open"), QStringLiteral("Built-in")});
+        choice->setCurrentText(type); steps_->setCellWidget(row, 0, choice);
+        auto* input = new QLineEdit(value, steps_); steps_->setCellWidget(row, 1, input);
+        input->setPlaceholderText(type == QStringLiteral("Wait") ? QStringLiteral("Milliseconds, e.g. 400") : QStringLiteral("Action value"));
+        steps_->setRowHeight(row, 48);
+        connect(input, &QLineEdit::textEdited, this, [this] { updateSmart(); });
+        connect(choice, &QComboBox::currentTextChanged, this, [this, input](const QString& type) {
+            input->setPlaceholderText(type == QStringLiteral("Wait") ? QStringLiteral("Milliseconds, e.g. 400") :
+                type == QStringLiteral("Text") ? QStringLiteral("Text to paste") :
+                type == QStringLiteral("Open") ? QStringLiteral("File path or URL") :
+                type == QStringLiteral("Shortcut") ? QStringLiteral("Ctrl+C, Super+Tab…") : QStringLiteral("VolumeUp, Mute, Ring…"));
+            updateSmart();
+        });
+    }
+
+    QString smartSequence() const {
+        QStringList result;
+        for (int row = 0; row < steps_->rowCount(); ++row) {
+            const auto type = static_cast<QComboBox*>(steps_->cellWidget(row, 0))->currentText();
+            auto value = static_cast<QLineEdit*>(steps_->cellWidget(row, 1))->text();
+            if (type == QStringLiteral("Text")) {
+                QString encoded;
+                for (const auto unit : value) encoded += QStringLiteral("%1").arg(unit.unicode(), 4, 16, QLatin1Char('0'));
+                value = QStringLiteral("TextHex(") + encoded + ')';
+            } else if (type == QStringLiteral("Wait") || type == QStringLiteral("Open"))
+                value = type + '(' + value + ')';
+            result.push_back(value);
+        }
+        return result.isEmpty() ? QStringLiteral("None") : result.join(';');
+    }
+
+    void loadSmart() {
+        const bool previous = loading_; loading_ = true;
+        hotkey_->setEnabled(trigger_->currentData().toString() == QStringLiteral("hotkey"));
+        auto entries = globalBindings(draft_, smartSection());
+        auto sequence = entries.value(smartKey().toLower());
+        if (sequence.isEmpty() && smartSection() != QStringLiteral("hotkeys"))
+            sequence = globalBindings(draft_).value(smartKey().toLower());
+        steps_->setRowCount(0);
+        for (const auto& action : splitActions(sequence)) {
+            const auto trimmed = action.trimmed(); if (trimmed == QStringLiteral("None")) continue;
+            const auto open = trimmed.indexOf('(');
+            if (trimmed.startsWith(QStringLiteral("TextHex(")) && trimmed.endsWith(')')) {
+                const auto hex = trimmed.mid(8, trimmed.size()-9); QString decoded;
+                for (int i = 0; i+3 < hex.size(); i += 4) decoded += QChar(hex.mid(i, 4).toUShort(nullptr, 16));
+                addStep(QStringLiteral("Text"), decoded);
+            } else if (open > 0 && trimmed.endsWith(')') &&
+                (trimmed.startsWith(QStringLiteral("Wait(")) || trimmed.startsWith(QStringLiteral("Text(")) || trimmed.startsWith(QStringLiteral("Open("))))
+                addStep(trimmed.left(open), trimmed.mid(open+1, trimmed.size()-open-2));
+            else addStep(trimmed.contains('+') ? QStringLiteral("Shortcut") : QStringLiteral("Built-in"), trimmed);
+        }
+        loading_ = previous;
+    }
+
+    void updateSmart() {
+        if (loading_ || smartKey().isEmpty()) return;
+        draft_ = replaceGlobalBinding(draft_, smartKey(), smartSequence(), smartSection());
+        const QSignalBlocker block(advanced_); advanced_->setPlainText(draft_); scheduleSave();
+    }
+
+    void moveStep(int offset) {
+        const int row = steps_->currentRow(), target = row + offset;
+        if (row < 0 || target < 0 || target >= steps_->rowCount()) return;
+        auto* type = static_cast<QComboBox*>(steps_->cellWidget(row, 0));
+        auto* value = static_cast<QLineEdit*>(steps_->cellWidget(row, 1));
+        auto* otherType = static_cast<QComboBox*>(steps_->cellWidget(target, 0));
+        auto* otherValue = static_cast<QLineEdit*>(steps_->cellWidget(target, 1));
+        const auto savedType = type->currentText(), savedValue = value->text();
+        loading_ = true; type->setCurrentText(otherType->currentText()); value->setText(otherValue->text());
+        otherType->setCurrentText(savedType); otherValue->setText(savedValue); loading_ = false;
+        steps_->selectRow(target); updateSmart();
+    }
+
+    void playSequence(const QString& sequence) {
+        auto file = std::make_shared<QTemporaryFile>();
+        if (!file->open()) { message(QStringLiteral("Could not create action preview file."), true); return; }
+        const auto bytes = (QStringLiteral("[hotkeys]\nCtrl+Alt+F10 = ") + sequence + '\n').toUtf8();
+        if (file->write(bytes) != bytes.size() || !file->flush()) { message(QStringLiteral("Could not write action preview."), true); return; }
+        const auto path = file->fileName(); file->close();
+        submit({QStringLiteral("check-actions"), {QStringLiteral("check-actions"), path},
+            [this, file, path](bool ok, const QString&, const QString& error) {
+                if (!ok) { message(error, true); return; }
+                submit({QStringLiteral("play-actions"), {QStringLiteral("play-actions"), path},
+                    [this, file](bool ok, const QString& output, const QString& error) {
+                        if (!ok) { message(error, true); return; }
+                        const auto result = QJsonDocument::fromJson(output.toUtf8()).object();
+                        if (!result.value(QStringLiteral("accepted")).toBool()) {
+                            message(QStringLiteral("The backend did not confirm accepting this action sequence."), true); return;
+                        }
+                        if (result.value(QStringLiteral("completed")).toBool()) message(QStringLiteral("Action sequence completed."));
+                        else message(QStringLiteral("Action #%1 queued. Execution has not been confirmed; check backend action status.")
+                            .arg(result.value(QStringLiteral("action_id")).toInt()));
+                    }});
+            }});
+    }
+
+    QWidget* ringPage() {
+        auto* page = new QWidget; auto* layout = new QVBoxLayout(page);
+        auto* text = new QLabel(QStringLiteral("Actions Ring opens a native radial menu. Select with the mouse, number keys, or arrows and Enter.\n"
+            "Folders open a submenu; Escape returns or closes. Assign Ring to any button or Smart Action."), page);
+        text->setWordWrap(true); layout->addWidget(text);
+        auto* preview = new QPushButton(QStringLiteral("Open Actions Ring"), page); preview->setObjectName(QStringLiteral("previewRing"));
+        layout->addWidget(preview);
+        auto* defaults = new QPushButton(QStringLiteral("Create default ring"), page); defaults->setObjectName(QStringLiteral("defaultRing")); layout->addWidget(defaults);
+        connect(defaults, &QPushButton::clicked, this, [this] {
+            if (!loo_ui::readRing(draft_).isEmpty()) { message(QStringLiteral("A ring already exists; its items were kept.")); return; }
+            draft_ += QStringLiteral("\n[ring]\nPlay / Pause = PlayPause\nMedia = Folder(Media)\nMute = Mute\nShow Desktop = Super+D\n"
+                "\n[ring/Media]\nPrevious Track = PreviousTrack\nNext Track = NextTrack\n");
+            setEditors(draft_); scheduleSave();
+        });
+        connect(preview, &QPushButton::clicked, this, [this] {
+            auto* ring = new loo_ui::RingDialog(loo_ui::readRing(draft_), this);
+            ring->setAttribute(Qt::WA_DeleteOnClose);
+            ring->selected = [this](const QString& action) { playSequence(action); };
+            ring->show(); ring->activateWindow();
+        });
+        layout->addStretch(); return page;
     }
 
     QWidget* advancedPage() {
@@ -374,12 +607,22 @@ private:
         return page;
     }
 
-    void setEditors(const QString& text) {
+    void setEditors(const QString& text, bool updateSteps = true) {
         loading_ = true;
-        advanced_->setPlainText(text);
-        const auto entries = globalBindings(text);
+        if (advanced_->toPlainText() != text) advanced_->setPlainText(text);
+        for (const auto& raw : text.split('\n')) {
+            const auto line = raw.trimmed();
+            if (!line.startsWith('[') || !line.endsWith(']')) continue;
+            const auto name = line.mid(1, line.size()-2).toLower();
+            if (name == QStringLiteral("hotkeys") || name == QStringLiteral("ring") || name.startsWith(QStringLiteral("ring/"))) continue;
+            if (profile_->findData(name) < 0) profile_->addItem(name, name);
+        }
+        auto entries = globalBindings(text);
+        const auto overrides = globalBindings(text, profile_->currentData().toString());
+        for (auto it = overrides.cbegin(); it != overrides.cend(); ++it) entries[it.key()] = it.value();
         for (auto it = bindings_.cbegin(); it != bindings_.cend(); ++it)
             it.value()->setCurrentText(entries.value(it.key()));
+        if (updateSteps) loadSmart();
         loading_ = false;
     }
 
@@ -490,7 +733,7 @@ private:
                 if (revision != revision_) return;
                 if (!ok) { message(error, true); return; }
                 if (!writeFile(config_, bytes)) { message(QStringLiteral("Cannot save configuration."), true); return; }
-                setEditors(QString::fromUtf8(bytes));
+                setEditors(QString::fromUtf8(bytes), false);
                 if (start) { startBackend(); return; }
                 if (!backendRunning_) {
                     message(QStringLiteral("Saved. Start the backend to apply mappings."));
@@ -498,8 +741,8 @@ private:
                 }
                 submit({QStringLiteral("reload"), {QStringLiteral("reload"), config_},
                     [this](bool ok, const QString& output, const QString& error) {
-                        const bool notified = QJsonDocument::fromJson(output.toUtf8()).object().value(QStringLiteral("reload_requested")).toBool();
-                        message(ok ? (notified ? QStringLiteral("Saved; notified the running backend to reload.")
+                        const bool notified = QJsonDocument::fromJson(output.toUtf8()).object().value(QStringLiteral("reloaded")).toBool();
+                        message(ok ? (notified ? QStringLiteral("Saved and applied by the running backend.")
                                                : QStringLiteral("Saved. Start the backend to apply mappings."))
                                    : QStringLiteral("Saved, but reload failed: ") + error, !ok);
                     }});
@@ -529,6 +772,10 @@ private:
     QSlider* slider_{};
     QPlainTextEdit* advanced_{};
     QPushButton *start_{}, *stop_{};
+    QComboBox *profile_{}, *trigger_{};
+    QLineEdit* profileName_{};
+    QKeySequenceEdit* hotkey_{};
+    QTableWidget* steps_{};
     QMap<QString, QCheckBox*> checks_;
     QMap<QString, QComboBox*> bindings_;
     QList<int> dpiChoices_;
@@ -558,12 +805,88 @@ int selfTest() {
     return 0;
 }
 
+#ifdef LOGI_GUI_TEST
+int interactionTests() {
+    QTemporaryDir directory;
+    if (!directory.isValid()) return 10;
+    const auto path = directory.filePath(QStringLiteral("mappings.ini"));
+    const auto initial = QString::fromLatin1(fallback_config) + QStringLiteral(
+        "\n[ring]\nMedia = Folder(Media)\nMute = Mute\n[ring/Media]\nNext = NextTrack\nPrevious = PreviousTrack\n");
+    if (!writeFile(path, initial.toUtf8())) return 11;
+    Window window(path, true, false); // Real asynchronous validator, no HID queries or backend start.
+    window.show();
+    if (!QTest::qWaitForWindowExposed(&window)) return 12;
+    const auto evidence = qEnvironmentVariable("LOGI_TEST_EVIDENCE");
+    auto screenshot = [&](QWidget& widget, const QString& name) {
+        if (evidence.isEmpty()) return true;
+        return QDir().mkpath(evidence) && widget.grab().save(QDir(evidence).filePath(name));
+    };
+    if (!screenshot(window, QStringLiteral("linux-main-settings.png"))) return 26;
+    auto await = [](const std::function<bool()>& condition) {
+        QElapsedTimer elapsed; elapsed.start();
+        while (!condition() && elapsed.elapsed() < 10000) QTest::qWait(20);
+        return condition();
+    };
+    auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("pages"));
+    auto* profileName = window.findChild<QLineEdit*>(QStringLiteral("profileName"));
+    QTest::mouseClick(profileName, Qt::LeftButton); QTest::keyClicks(profileName, "firefox");
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("addProfile")), Qt::LeftButton);
+    if (!await([&] { return readFile(path).contains(QStringLiteral("[firefox]")); })) return 13;
+    QTest::mouseClick(tabs->tabBar(), Qt::LeftButton, Qt::NoModifier, tabs->tabBar()->tabRect(1).center());
+    auto* mapping = window.findChild<QComboBox*>(QStringLiteral("binding_0053"));
+    QTest::mouseClick(mapping->lineEdit(), Qt::LeftButton);
+    QTest::keyClick(mapping->lineEdit(), Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(mapping->lineEdit(), "Ctrl+Tab");
+    if (!await([&] { return globalBindings(readFile(path), QStringLiteral("firefox")).value(QStringLiteral("0053")) == QStringLiteral("Ctrl+Tab"); })) return 14;
+    if (globalBindings(readFile(path)).value(QStringLiteral("0053")) != QStringLiteral("MouseBack")) return 15;
+    QTest::mouseClick(tabs->tabBar(), Qt::LeftButton, Qt::NoModifier, tabs->tabBar()->tabRect(2).center());
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("addStep")), Qt::LeftButton);
+    auto* steps = window.findChild<QTableWidget*>(QStringLiteral("smartSteps"));
+    auto* value = static_cast<QLineEdit*>(steps->cellWidget(steps->rowCount()-1, 1));
+    QTest::mouseClick(value, Qt::LeftButton); QTest::keyClick(value, Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(value, "240");
+    if (!await([&] { return globalBindings(readFile(path), QStringLiteral("firefox")).value(QStringLiteral("0052")).endsWith(QStringLiteral("Wait(240)")); })) return 16;
+    if (!screenshot(window, QStringLiteral("linux-smart-actions.png"))) return 27;
+    const auto valid = readFile(path);
+    QTest::keyClick(value, Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(value, "not-a-number");
+    auto* status = window.findChild<QLabel*>(QStringLiteral("statusMessage"));
+    if (!await([&] { return status->text().contains(QStringLiteral("Invalid"), Qt::CaseInsensitive); })) return 17;
+    if (readFile(path) != valid) return 18;
+    QTest::keyClick(value, Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(value, "300");
+    if (!await([&] { return readFile(path).contains(QStringLiteral("Wait(300)")); })) return 19;
+    QString selected;
+    loo_ui::RingDialog ring(loo_ui::readRing(initial)); ring.selected = [&](const QString& action) { selected = action; };
+    ring.show(); if (!QTest::qWaitForWindowExposed(&ring)) return 20;
+    QTest::mouseClick(ring.findChild<QPushButton*>(QStringLiteral("ringItem0")), Qt::LeftButton);
+    QTest::qWait(10);
+    if (ring.findChild<QPushButton*>(QStringLiteral("ringBack"))->text() != QStringLiteral("Back")) return 21;
+    if (!screenshot(ring, QStringLiteral("linux-ring-submenu.png"))) return 28;
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
+    QTest::qWait(10);
+    if (ring.findChild<QPushButton*>(QStringLiteral("ringBack"))->text() != QStringLiteral("Close")) return 22;
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_1); QTest::qWait(10);
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Right);
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Return);
+    if (selected != QStringLiteral("PreviousTrack") || ring.isVisible()) return 23;
+    loo_ui::RingDialog cancel(loo_ui::readRing(initial)); cancel.show();
+    if (!QTest::qWaitForWindowExposed(&cancel)) return 24;
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
+    if (cancel.isVisible()) return 25;
+    window.close();
+    qInfo("Qt interaction tests passed: profile isolation, edits, durable save, rejected invalid config, ring mouse/keyboard/navigation/cancel.");
+    return 0;
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv) {
     QApplication application(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("logi-options-open"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0-alpha.2"));
+#ifdef LOGI_GUI_TEST
+    const int result = interactionTests();
+    if (result) qCritical("Qt interaction test failed at checkpoint %d", result);
+    return result;
+#endif
     if (application.arguments().contains(QStringLiteral("--self-test"))) return selfTest();
     if (loo::notice_required()) {
         QMessageBox notice(QMessageBox::Warning, QStringLiteral("Third-party experimental software / 第三方实验软件"),
@@ -578,6 +901,49 @@ int main(int argc, char** argv) {
             QMessageBox::critical(nullptr, QString::fromLatin1(title), QStringLiteral("Could not save acknowledgement. No mouse backend was started."));
             return 1;
         }
+    }
+    const auto arguments = application.arguments();
+    const auto ringIndex = arguments.indexOf(QStringLiteral("--ring"));
+    if (ringIndex >= 0) {
+        if (ringIndex+1 >= arguments.size()) { qCritical("--ring requires a configuration path"); return 2; }
+        const auto folderIndex = arguments.indexOf(QStringLiteral("--folder"));
+        const auto folder = folderIndex >= 0 && folderIndex+1 < arguments.size() ? arguments[folderIndex+1] : QString{};
+        loo_ui::RingDialog ring(loo_ui::readRing(readFile(arguments[ringIndex+1])), nullptr, folder);
+        if (!ring.error().isEmpty()) { qCritical("%s", qPrintable(ring.error())); return 2; }
+        application.setQuitOnLastWindowClosed(false);
+        bool executing = false;
+        QObject::connect(&ring, &QDialog::finished, &application, [&](int) { if (!executing) application.quit(); });
+        ring.selected = [&](const QString& action) {
+            executing = true;
+            auto file = std::make_shared<QTemporaryFile>();
+            if (!file->open()) { application.exit(1); return; }
+            const auto content = (QStringLiteral("[hotkeys]\nCtrl+Alt+F10 = ") + action + '\n').toUtf8();
+            if (file->write(content) != content.size() || !file->flush()) { application.exit(1); return; }
+            const auto path = file->fileName(); file->close();
+            auto* command = new QProcess(&application);
+            auto cli = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("logi-cli"));
+            if (!QFileInfo::exists(cli)) cli = QStandardPaths::findExecutable(QStringLiteral("logi-cli"));
+            command->setProgram(cli); command->setArguments({QStringLiteral("play-actions"), path});
+            QObject::connect(command, &QProcess::finished, &application, [&, command, file](int code, QProcess::ExitStatus status) {
+                if (status != QProcess::NormalExit || code != 0) {
+                    qCritical("%s", command->readAllStandardError().constData());
+                    application.exit(status == QProcess::NormalExit ? code : 1); return;
+                }
+                const auto result = QJsonDocument::fromJson(command->readAllStandardOutput()).object();
+                if (!result.value(QStringLiteral("accepted")).toBool()) {
+                    qCritical("The backend did not confirm accepting the selected ring action."); application.exit(1); return;
+                }
+                if (result.value(QStringLiteral("completed")).toBool()) qInfo("Ring action completed.");
+                else qInfo("Ring action #%d queued; execution has not been confirmed.", result.value(QStringLiteral("action_id")).toInt());
+                application.exit(0);
+            });
+            QObject::connect(command, &QProcess::errorOccurred, &application, [&, file](QProcess::ProcessError error) {
+                if (error == QProcess::FailedToStart) application.exit(1);
+            });
+            QTimer::singleShot(150, command, [command] { command->start(); });
+        };
+        ring.show(); ring.activateWindow();
+        return application.exec();
     }
     Window window(configPath());
     window.show();
