@@ -1181,7 +1181,9 @@ int main(int argc, char** argv) {
         ring.show(); ring.activateWindow();
         return application.exec();
     }
-    Window window(configPath());
+    const auto configIndex=arguments.indexOf(QStringLiteral("--config"));
+    if(configIndex>=0 && configIndex+1>=arguments.size()){qCritical("--config requires a configuration path");return 2;}
+    Window window(configIndex>=0?QFileInfo(arguments[configIndex+1]).absoluteFilePath():configPath());
     window.show();
     return application.exec();
 }
