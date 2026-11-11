@@ -27,17 +27,23 @@ struct Receiver {
         require(display,"No X11 test display");
         active=XInternAtom(display,"_NET_ACTIVE_WINDOW",False);clipboard=XInternAtom(display,"CLIPBOARD",False);
         utf8=XInternAtom(display,"UTF8_STRING",False);paste_property=XInternAtom(display,"LOO_TEST_PASTE",False);
-        first=window("loo-editor","LooEditor",40);second=window("loo-browser","LooBrowser",300);
+        // Map only the client currently under test. Mapping both lets a delayed
+        // WM focus-on-map for Browser race with Editor's first profile lookup.
+        first=window("loo-editor","LooEditor",40);
+        wait_mapped(first);
+    }
+    void wait_mapped(Window window) {
         XSync(display,False);
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
         for(;;) {
-            XWindowAttributes a{},b{};XGetWindowAttributes(display,first,&a);XGetWindowAttributes(display,second,&b);
-            if(a.map_state==IsViewable && b.map_state==IsViewable)break;
+            XWindowAttributes state{};XGetWindowAttributes(display,window,&state);
+            if(state.map_state==IsViewable)break;
             require(std::chrono::steady_clock::now()<deadline,"Window manager did not map test clients");
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
-    ~Receiver(){if(display){XDestroyWindow(display,first);XDestroyWindow(display,second);XCloseDisplay(display);}}
+    void create_browser(){second=window("loo-browser","LooBrowser",300);wait_mapped(second);}
+    ~Receiver(){if(display){if(first)XDestroyWindow(display,first);if(second)XDestroyWindow(display,second);XCloseDisplay(display);}}
     Window window(const char* instance,const char* type,int x) {
         const auto w=XCreateSimpleWindow(display,DefaultRootWindow(display),x,60,240,160,0,0,0x223344);
         XClassHint hint{const_cast<char*>(instance),const_cast<char*>(type)};XSetClassHint(display,w,&hint);
@@ -127,6 +133,7 @@ int main() {
         require(!identity.empty() && identity.front()==normalized(std::filesystem::read_symlink("/proc/self/exe").filename().string()),"PID executable identity priority");
         desktop.inject_chord(lookup(config,{0x53,Direction::tap},identity)->front().keys);
         until("editor Ctrl+E input",desktop,receiver,[&]{return std::ranges::find(receiver.symbols,XK_e)!=receiver.symbols.end();},fired);
+        receiver.create_browser();
         receiver.activate(receiver.second);
         until("browser foreground",desktop,receiver,[&]{const auto ids=desktop.foreground();return std::ranges::find(ids,"loobrowser")!=ids.end();},fired);
         desktop.inject_chord(lookup(config,{0x53,Direction::tap},desktop.foreground())->front().keys);
@@ -172,14 +179,20 @@ int main() {
         require(receiver.modifiers_up(),"Text left modifiers down");
         require(receiver.focus>=2 && receiver.release>0,"Focus/key release events not observed");
 
+        // A Wayland session without its native bridge must not silently fall
+        // back to the otherwise accessible X11 DISPLAY used by this test.
+        const char* previous_bus=std::getenv("DBUS_SESSION_BUS_ADDRESS");
+        const std::string saved_bus=previous_bus?previous_bus:"";
+        setenv("DBUS_SESSION_BUS_ADDRESS",("unix:path=/tmp/loo-no-native-bridge-"+std::to_string(getpid())).c_str(),1);
         setenv("XDG_SESSION_TYPE","wayland",1);
-        {Desktop wayland;require(!wayland.available(),"Xwayland falsely accepted");
+        {Desktop wayland;require(!wayland.available(),"Missing native bridge incorrectly fell back to Xwayland");
          wayland.validate(parse("[global]\n0053=MouseBack"));
          rejects([&]{wayland.validate(config);});
-         rejects([&]{wayland.type_text("unsupported");});}
+         rejects([&]{wayland.type_text("missing native bridge");});}
+        if(previous_bus)setenv("DBUS_SESSION_BUS_ADDRESS",saved_bus.c_str(),1);else unsetenv("DBUS_SESSION_BUS_ADDRESS");
         std::cout<<"X11 real events: focus="<<receiver.focus<<", key presses="<<receiver.press<<", key releases="<<receiver.release
                  <<", global triggers="<<fired.size()<<", UTF-8 paste payloads="<<receiver.pasted.size()<<"\n"
-                 <<"Application/PID matching, profile inheritance, grab rollback, modifier release, UTF-8 paste and Wayland rejection passed\n";
+                 <<"Application/PID matching, profile inheritance, grab rollback, modifier release, UTF-8 paste and missing-native-bridge rejection passed\n";
         return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

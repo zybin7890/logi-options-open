@@ -54,6 +54,7 @@ bool down(const char* state,unsigned code){return code<256 && (static_cast<unsig
 bool text_actions(const std::vector<Action>& sequence){return std::ranges::any_of(sequence,[](const Action& a){return a.operation==Op::text;});}
 }
 struct Desktop::Impl {
+    std::unique_ptr<WaylandDesktop> wayland;
     Display* display{};
     Window root{},clipboard_window{};
     Atom active{},pid{},clipboard{},targets{},utf8{};
@@ -70,10 +71,10 @@ struct Desktop::Impl {
     std::string clipboard_text;
     bool paste_pending{};
     Clock::time_point paste_deadline{};
-    Impl() {
+    explicit Impl(KeyEmitter emitter) {
         const auto session=std::getenv("XDG_SESSION_TYPE"),wayland=std::getenv("WAYLAND_DISPLAY");
         if((session && normalized(session)=="wayland") || (wayland && *wayland)) {
-            unavailable="Application profiles, global hotkeys and Text require an X11 session; native Wayland/Xwayland is not supported";return;
+            this->wayland=std::make_unique<WaylandDesktop>(std::move(emitter));return;
         }
         display=XOpenDisplay(nullptr);
         if(!display){unavailable="No accessible X11 DISPLAY; application profiles, global hotkeys and Text are unavailable";return;}
@@ -153,11 +154,19 @@ struct Desktop::Impl {
         XSendEvent(display,request.requestor,False,0,&event);XFlush(display);
     }
 };
-Desktop::Desktop():impl_(std::make_unique<Impl>()){}
+Desktop::Desktop(KeyEmitter emitter):impl_(std::make_unique<Impl>(std::move(emitter))){}
 Desktop::~Desktop()=default;
-bool Desktop::available()const{return impl_->display!=nullptr;}
-const std::string& Desktop::reason()const{return impl_->unavailable;}
+bool Desktop::available()const{return impl_->wayland?impl_->wayland->available():impl_->display!=nullptr;}
+const std::string& Desktop::reason()const{return impl_->wayland?impl_->wayland->reason():impl_->unavailable;}
+std::string Desktop::status_json()const {
+    if(impl_->wayland)return impl_->wayland->status_json();
+    const std::string ready=available()?"true":"false",clipboard=available()&&impl_->xtest?"true":"false";
+    const auto reason=available()?"":"No accessible X11 DISPLAY";
+    return "{\"available\":"+ready+",\"desktop\":\"X11\",\"native_wayland\":false,\"foreground\":"+ready+
+        ",\"shortcuts\":"+ready+",\"clipboard\":"+clipboard+",\"clipboard_ack\":"+clipboard+",\"reason\":\""+reason+"\"}";
+}
 std::vector<std::string> Desktop::foreground() {
+    if(impl_->wayland)return impl_->wayland->foreground();
     if(!available())return {};
     auto& x=*impl_;ErrorScope errors(x.display);
     auto window=static_cast<Window>(x.property(x.root,x.active,XA_WINDOW));
@@ -184,6 +193,7 @@ std::vector<std::string> Desktop::foreground() {
     return errors.finish()?std::vector<std::string>{}:identities;
 }
 void Desktop::validate(const Config& config)const {
+    if(impl_->wayland){impl_->wayland->validate(config);return;}
     bool text=false;
     for(const auto& [id,sequence]:config.bindings)text|=text_actions(sequence);
     for(const auto& [name,profile]:config.profiles)for(const auto& [id,sequence]:profile.bindings)text|=text_actions(sequence);
@@ -204,6 +214,7 @@ void Desktop::validate(const Config& config)const {
     }
 }
 void Desktop::configure_hotkeys(const Config& config) {
+    if(impl_->wayland){impl_->wayland->configure_hotkeys(config);return;}
     validate(config);if(!available())return;
     auto& x=*impl_;std::map<Impl::Grab,std::vector<Action>> fresh;
     for(const auto& hotkey:config.hotkeys) {
@@ -229,6 +240,7 @@ void Desktop::configure_hotkeys(const Config& config) {
     x.triggers=std::move(fresh);x.awaiting_release.clear();x.pressed_triggers.clear();XFlush(x.display);
 }
 void Desktop::suspend_hotkeys(bool suspended) {
+    if(impl_->wayland){impl_->wayland->suspend_hotkeys(suspended);return;}
     if(!available() || impl_->suspended==suspended)return;
     auto& x=*impl_;ErrorScope errors(x.display);
     if(suspended) {
@@ -250,6 +262,7 @@ void Desktop::suspend_hotkeys(bool suspended) {
     x.pressed_triggers.clear();x.awaiting_release.clear();XSync(x.display,False);
 }
 std::vector<std::vector<Action>> Desktop::poll_hotkeys() {
+    if(impl_->wayland)return impl_->wayland->poll_hotkeys();
     std::vector<std::vector<Action>> result;if(!available())return result;
     auto& x=*impl_;ErrorScope errors(x.display);
     while(XPending(x.display)) {
@@ -288,14 +301,16 @@ std::vector<std::vector<Action>> Desktop::poll_hotkeys() {
     return result;
 }
 void Desktop::type_text(std::string_view text) {
+    if(impl_->wayland){impl_->wayland->type_text(text);return;}
     if(!available())throw std::runtime_error(reason());
     if(!impl_->xtest)throw std::runtime_error("Text requires the XTEST extension");
     if(text.empty() || text.size()>8192 || text.find('\0')!=text.npos)throw std::runtime_error("Invalid Text payload");
     if(impl_->texts.size()>=64)throw std::runtime_error("Text queue is full");
     impl_->texts.emplace_back(text);
 }
-bool Desktop::busy()const{return !impl_->texts.empty() || impl_->paste_pending;}
+bool Desktop::busy()const{return impl_->wayland?impl_->wayland->busy():!impl_->texts.empty() || impl_->paste_pending;}
 void Desktop::inject_chord(const std::vector<unsigned>& keys) {
+    if(impl_->wayland){impl_->wayland->inject_chord(keys);return;}
     if(!available())throw std::runtime_error(reason());impl_->send_chord(keys);
 }
 }

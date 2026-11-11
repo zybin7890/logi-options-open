@@ -1,5 +1,6 @@
 #include "agent.hpp"
 #include "first_run.hpp"
+#include "desktop.hpp"
 #include <iostream>
 #include <thread>
 namespace {
@@ -10,7 +11,7 @@ bool consent(){
 void help(){
     std::cout<<"Logi Options Open - experimental Linux backend\n"
         "logi-cli disclaimer | accept-disclaimer | check-disclaimer\n"
-        "logi-cli list | status | status-json | hosts | hosts-json | agent-status\n"
+        "logi-cli list | status | status-json | hosts | hosts-json | agent-status | desktop-status\n"
         "logi-cli set <dpi|smartshift|ratchet|hires|invert|thumb-invert> <value>\n"
         "logi-cli switch-host <1..3> | recover-input\n"
         "logi-cli check-config [file] | run [file] | reload [file] | stop\n"
@@ -20,14 +21,19 @@ void help(){
         "play-actions accepted=true means queued, not completed. Inspect agent-status\n"
         "pending_actions, last_completed_action and last_action_error for execution.\n"
         "reload succeeds only after device/configuration application.\n"
-        "App profiles, global hotkeys and Text require an X11 desktop; global uinput\n"
-        "mappings work independently of X11. Flow/firmware updates are unsupported.\n";
+        "Desktop features use X11 or the native GNOME/KDE Wayland bridge. Check\n"
+        "desktop-status for live capabilities; basic uinput mappings are independent.\n"
+        "Flow/firmware updates are unsupported.\n";
 }
 }
 int main(int argc,char** argv){
     try{
         const std::string command=argc>1?argv[1]:"help";
         if(command=="help"||command=="--help"||command=="-h"){help();return 0;}
+        if(command=="desktop-status"){
+            if(argc!=2)throw std::runtime_error("desktop-status takes no arguments");
+            loo_linux::Desktop desktop;std::cout<<desktop.status_json()<<'\n';return 0;
+        }
         if(command=="disclaimer"){std::cout<<loo::notice_text<<'\n';return 0;}
         if(command=="accept-disclaimer"){
             if(!loo::accept_notice())throw std::runtime_error("Cannot persist first-use acknowledgement");

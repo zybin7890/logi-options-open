@@ -10,7 +10,7 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-19 ninja-build libhidapi-dev qt6-base-dev libgl1-mesa-dev libx11-dev libxtst-dev xvfb xauth openbox
+          sudo apt-get install -y clang-19 ninja-build libhidapi-dev libglib2.0-dev qt6-base-dev libgl1-mesa-dev libx11-dev libxtst-dev libwayland-dev xvfb xauth openbox
           python3 -m pip install 'cmake>=4.1,<4.2'
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
@@ -37,6 +37,43 @@ jobs:
         with:
           name: logi-options-open-linux-x64
           path: build/logi-options-open-*.tar.gz
+  wayland:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        desktop: [gnome, kde]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 ninja-build libhidapi-dev libglib2.0-dev qt6-base-dev qt6-wayland libgl1-mesa-dev libx11-dev libxtst-dev libwayland-dev xvfb xauth dbus-x11 python3-gi acl
+          if [ '${{ matrix.desktop }}' = gnome ]; then
+            sudo apt-get install -y gnome-shell gjs
+          else
+            sudo apt-get install -y kwin-wayland kwin-wayland-backend-virtual plasma-workspace libkf5globalaccel-bin qtwayland5
+          fi
+          python3 -m pip install 'cmake>=4.1,<4.2'
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel 2
+      - name: Actual native Wayland behavior
+        timeout-minutes: 8
+        env:
+          LOGI_TEST_ALLOW_DEVICE_ACL: '1'
+        run: |
+          sudo modprobe uinput
+          sudo chmod 666 /dev/uinput
+          mkdir -p build/test-evidence
+          export LOGI_TEST_EVIDENCE="$(realpath build/test-evidence)"
+          bash tests/run-${{ matrix.desktop }}-wayland.sh build/logi-linux-wayland-tests
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wayland-${{ matrix.desktop }}-evidence
+          path: build/test-evidence/
   windows:
     runs-on: windows-latest
     defaults:

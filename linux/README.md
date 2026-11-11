@@ -8,17 +8,18 @@ CI compilation and offline tests do not establish MX Master 3S hardware support.
 ## Build
 
 Dependencies: CMake 3.30+, a C++26-capable compiler (CI uses Clang 19), pkg-config,
-libhidapi-dev, and Qt 6 Widgets development files. For Ubuntu:
+libhidapi-dev, GLib/GIO, libwayland and Qt 6 Widgets/DBus development files. For Ubuntu:
 
 ```sh
-sudo apt install clang-19 libhidapi-dev pkg-config qt6-base-dev libx11-dev libxtst-dev xvfb xauth openbox
+sudo apt install clang-19 libhidapi-dev libglib2.0-dev libwayland-dev pkg-config qt6-base-dev qt6-wayland libx11-dev libxtst-dev xvfb xauth openbox
 cmake -S . -B build -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 xvfb-run -a sh tests/run-linux-desktop-tests.sh build
 ./build/logi-options-open
 ```
 
-Use `-DLOGI_BUILD_GUI=OFF` for a small CLI/daemon-only build. No browser runtime
+Use `-DLOGI_BUILD_GUI=OFF` to omit the settings window. The KDE desktop bridge
+still uses Qt Core/Gui/DBus, separately from the device daemon. No browser runtime
 is required. The daemon reads HID input with a bounded blocking wait and does
 not run the GUI. Actual memory consumption has not been measured on Linux.
 
@@ -67,7 +68,7 @@ Read-only commands and input recovery remain available without acknowledgement.
 waits for device and desktop configuration to apply; failures preserve the previous
 live configuration or clear readiness if rollback fails. A different path requires restarting the daemon.
 
-Supported commands: `list`, `status`, `status-json`, `hosts`, `hosts-json`,
+Supported commands: `list`, `status`, `status-json`, `hosts`, `hosts-json`, `desktop-status`,
 `agent-status` (alias `agent-json`), `set NAME VALUE`, `switch-host N`,
 `recover-input`, `check-config`, `run`, `reload`, `stop`, `disclaimer`,
 `accept-disclaimer`, `check-disclaimer`, `check-actions FILE`, `play-actions FILE`,
@@ -84,7 +85,10 @@ contains cached device values; settings written by this daemon update that cache
 after readback. Recovery stops remapping before restoring standard input.
 
 `[global]` is the fallback profile. X11 application sections match WM_CLASS or
-the foreground executable basename, case-insensitively. For example, `[firefox]`
+the foreground executable basename, case-insensitively. Native Wayland profiles
+match compositor-provided application/desktop IDs, e.g. `[org.mozilla.firefox]`.
+`desktop-status` reports live desktop capabilities without opening the mouse.
+For example, `[firefox]`
 can override only `thumb.left=Ctrl+Shift+Tab` while inheriting the other mappings.
 The GUI provides application selection and structured Smart Action editing.
 Buttons use hexadecimal control IDs;
@@ -95,13 +99,13 @@ and `thumb.speed=10..200` scales its resolution. Example actions include
 `Ctrl+C;Wait(100);Ctrl+V`. `Open(file-or-URL)` invokes xdg-open without a shell.
 Desktop shortcuts differ by compositor; edit the defaults for your desktop.
 
-`[hotkeys]` registers X11 global triggers, for example `Ctrl+Shift+F10=Ctrl+C;Wait(100);Ctrl+V`.
+`[hotkeys]` registers global triggers, for example `Ctrl+Shift+F10=Ctrl+C;Wait(100);Ctrl+V`.
 Shortcuts mapped by XKB to virtual-terminal switching (commonly Ctrl+Alt+F1–F12)
 are rejected with their actual reserved keysym, rather than silently registering
 a trigger the application cannot receive. Other conflicts fail explicitly;
 generated actions temporarily suspend this process's
 grabs to avoid recursively triggering themselves. `Text(hello)` and UTF-16 encoded
-`TextHex(...)` paste UTF-8 through the X11 clipboard; **this replaces CLIPBOARD**
+`TextHex(...)` paste UTF-8 through the desktop clipboard; **this replaces CLIPBOARD**
 and requires a target application that supports Ctrl+V. The daemon services
 clipboard requests asynchronously; an unaccepted paste reports an action error.
 
@@ -123,10 +127,29 @@ Stopping while the physical device is offline cannot restore that offline device
 after reconnecting, use `recover-input` if its controls remain diverted. Saved
 restoration state is retained in memory only while the daemon stays running.
 
-Application matching, global triggers and text paste currently require **X11**.
-Wayland/Xwayland sessions reject those features explicitly; basic uinput global
-device mappings do not depend on X11. A compositor portal/extension integration
-is still needed for equivalent native Wayland desktop features. Flow, vendor
+## Native Wayland integration
+
+This development branch adds compositor-native desktop bridges. Actual GNOME/KDE
+acceptance is a release gate; implementation or compilation alone is not a pass.
+
+- GNOME Shell 46: install and enable the optional [Shell extension](gnome/README.md).
+- KDE Plasma 5.27/KWin Wayland: run the optional [desktop provider](kde/README.md).
+  Complete shortcut-release detection additionally needs read access to the active
+  keyboard's evdev state. Missing access is reported, not silently ignored.
+
+The bridge reports native foreground IDs, owns only this daemon's requested
+shortcuts, and serves immutable clipboard data. A shortcut conflict retains the
+previous registrations; closing the daemon releases its sender's resources.
+Keyboard actions continue through production uinput. No Xwayland foreground or
+clipboard fallback is used. Other compositors, or sessions without the required
+bridge, reject unsupported profiles/hotkeys/text explicitly; basic device mappings
+remain independent of desktop integration.
+
+Clipboard data-read acknowledgements order consecutive text actions. They do not
+prove the intended application inserted the text: clipboard managers can also
+read a selection. Target Ctrl+V support and actual receiver behavior matter.
+
+Flow, vendor
 pairing/firmware updates and the full official Smart Actions template/plugin
 catalog are not implemented. Left/right physical buttons and the main wheel
 are not grabbed or diverted by the mapping daemon.
@@ -138,6 +161,15 @@ clipboard transfers and Qt mouse/keyboard interactions under Xvfb/Openbox. GUI
 tests run the real CLI validator and verify persisted configuration/error handling.
 Separate processes exercise real CLI/HTTP/MCP against the production daemon loop
 with explicitly simulated device/input adapters, including reconnect and failures.
+
+The GNOME and KDE runners start isolated real Wayland compositors, with native Qt
+clients. They verify application IDs/profile switching, actual global-shortcut
+release and conflict handling, native Unicode/consecutive pastes and GUI/Ring
+interaction. Production uinput writes real kernel events; because the CI desktop
+is nested/virtual, a test-only evdev transport feeds those observed events into
+the compositor's native input API. This transport is not installed in the product
+and does not substitute a fake Qt window or Xwayland client. Logs and receiver
+screenshots are retained as CI artifacts, including on failure.
 
 `sudo modprobe uinput` followed by `sudo ctest --test-dir build -R linux-uinput-kernel -V`
 tests the production uinput implementation against actual kernel evdev events.

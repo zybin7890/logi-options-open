@@ -399,8 +399,8 @@ private:
             });
         }
         auto* help = new QLabel(QStringLiteral("Mappings are validated and saved automatically.\n"
-            "Application overrides inherit missing mappings from Global. X11 foreground detection selects the profile.\n"
-            "Desktop shortcuts depend on your compositor; Wayland application detection and Flow are not supported."), page);
+            "Application overrides inherit missing mappings from Global. Desktop integration selects the active profile.\n"
+            "Native GNOME Wayland requires the optional desktop bridge extension. Desktop shortcuts depend on your compositor; Flow is not implemented."), page);
         help->setWordWrap(true);
         form->addRow(help);
         scroll->setWidget(page);
@@ -428,7 +428,7 @@ private:
             {QStringLiteral("Middle button"), QStringLiteral("0052")}, {QStringLiteral("Back button"), QStringLiteral("0053")},
             {QStringLiteral("Forward button"), QStringLiteral("0056")}, {QStringLiteral("Top button"), QStringLiteral("00c4")},
             {QStringLiteral("Gesture click"), QStringLiteral("00c3")}, {QStringLiteral("Gesture left"), QStringLiteral("00c3.left")},
-            {QStringLiteral("Gesture right"), QStringLiteral("00c3.right")}, {QStringLiteral("Global shortcut (X11)"), QStringLiteral("hotkey")}};
+            {QStringLiteral("Gesture right"), QStringLiteral("00c3.right")}, {QStringLiteral("Global shortcut"), QStringLiteral("hotkey")}};
         for (const auto& pair : triggers) trigger_->addItem(pair.first, pair.second);
         form->addRow(QStringLiteral("When"), trigger_);
         hotkey_ = new QKeySequenceEdit(page); hotkey_->setObjectName(QStringLiteral("smartHotkey"));
@@ -809,6 +809,10 @@ int selfTest() {
 
 #ifdef LOGI_GUI_TEST
 int interactionTests() {
+    if (qEnvironmentVariableIsSet("LOGI_TEST_REQUIRE_NATIVE_WAYLAND") &&
+        !QGuiApplication::platformName().startsWith(QStringLiteral("wayland"))) {
+        qCritical("GUI interaction test requires the actual native Wayland platform"); return 29;
+    }
     QTemporaryDir directory;
     if (!directory.isValid()) return 10;
     const auto path = directory.filePath(QStringLiteral("mappings.ini"));

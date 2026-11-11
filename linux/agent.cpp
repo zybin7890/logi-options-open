@@ -241,6 +241,13 @@ void launch(const std::vector<std::string>& arguments){
 class DesktopHooks final:public RuntimeHooks{
     Desktop desktop;
 public:
+    explicit DesktopHooks(InputSink& input):desktop([&input](const std::vector<unsigned>& keys){
+        std::vector<unsigned> pressed;
+        try{
+            for(auto key:keys){input.key(key,true);pressed.push_back(key);}input.sync();
+            for(auto it=pressed.rbegin();it!=pressed.rend();++it)input.key(*it,false);input.sync();
+        }catch(...){for(auto it=pressed.rbegin();it!=pressed.rend();++it){try{input.key(*it,false);}catch(...){}}try{input.sync();}catch(...){}throw;}
+    }){}
     void validate(const Config& config)override{desktop.validate(config);}
     void configure(const Config& config)override{desktop.configure_hotkeys(config);}
     std::vector<std::string> foreground()override{return desktop.foreground();}
@@ -445,7 +452,7 @@ int run_with(const std::filesystem::path& config_file,DeviceBackend& device,Inpu
         if(ending)respond(ending->peer.value,false,error.what());throw;
     }
 }
-int run(const std::filesystem::path& config){auto input=make_uinput_sink();HidDevice device;DesktopHooks hooks;return run_with(config,device,*input,hooks);}
+int run(const std::filesystem::path& config){auto input=make_uinput_sink();HidDevice device;DesktopHooks hooks(*input);return run_with(config,device,*input,hooks);}
 std::string dispatch(const std::string& command){
     if(running())return transact(command);
     // Same exclusive lock closes the check/start race with a newly started daemon.
@@ -456,7 +463,7 @@ std::string dispatch(const std::string& command){
     stopped=false;signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);HidDevice device;
     if(!device.connect(stopped))throw std::runtime_error("No accessible HID++ mouse; check hidraw permissions and connection");
     if(command.starts_with("play-actions ")){
-        auto sequence=load_actions(std::filesystem::path(command.substr(13)));auto input=make_uinput_sink();DesktopHooks hooks;
+        auto sequence=load_actions(std::filesystem::path(command.substr(13)));auto input=make_uinput_sink();DesktopHooks hooks(*input);
         Config config;config.bindings.emplace(Binding{0x52,Direction::tap},sequence);hooks.validate(config);hooks.suspend_hotkeys(true);
         for(const auto& action:sequence){
             if(stopped.load())throw std::runtime_error("Action playback cancelled");

@@ -13,12 +13,12 @@
 | 原生设置界面 | Win32 | Qt6 Widgets |
 | 电量、DPI、SmartShift、滚轮参数 | 已实现；MX Master 3S + Bolt 本机验证 | 已移植；需要 Linux 实机验收 |
 | 全局按键、拇指滚轮、四向手势 | 已实现；本机验证 | hidapi + uinput 后端；需要实机验收 |
-| 应用专属配置、全局快捷键 | 已实现 | X11 前台应用匹配与快捷键；Wayland 尚未支持 |
-| Smart Actions、Actions Ring | 已实现部分功能 | 结构化动作编辑、序列、原生环形菜单与子目录；文本输入限 X11 |
+| 应用专属配置、全局快捷键 | 已实现 | X11；原生 GNOME/KDE Wayland 支持在验证分支开发，验收前不发布 |
+| Smart Actions、Actions Ring | 已实现部分功能 | 结构化动作编辑、序列、原生环形菜单与子目录；原生剪贴板文本输入 |
 | HTTP API / MCP stdio / CLI | 已提供 | 已适配支持的 Linux 命令 |
 | Flow、配对、固件更新、完整官方插件兼容 | 未实现 | 未实现 |
 
-Windows 设备验证来自本项目开发过程；不意味着所有 Logitech 设备均兼容。Linux 的桌面/内核输入测试不等于鼠标硬件测试。Wayland 可使用基础 uinput 映射，但桌面快捷键取决于桌面环境；应用识别、全局快捷键监听、Text 输入目前仅支持 X11，检测到 Wayland/Xwayland 时明确拒绝这些配置。不要同时让 Solaar、logid 和本项目修改同一设备。
+Windows 设备验证来自本项目开发过程；不意味着所有 Logitech 设备均兼容。Linux 的桌面/内核输入测试不等于鼠标硬件测试。Wayland 的应用识别、全局快捷键和 Text 输入通过原生 GNOME/KDE 桌面桥接实现，详见 [Linux 说明](linux/README.md#native-wayland-integration)。未启用对应桥接或缺少能力时明确拒绝相关配置，不用 Xwayland 冒充支持。当前分支新增部分需通过真实桌面验收后才发布。不要同时让 Solaar、logid 和本项目修改同一设备。
 
 ## Windows
 
@@ -44,7 +44,7 @@ Windows 设备验证来自本项目开发过程；不意味着所有 Logitech �
 依赖：支持 C++26 的编译器、CMake 3.30+（建议 4.1）、Ninja、hidapi-hidraw 开发包；界面需要 Qt6 Widgets。Ubuntu 24.04 示例：
 
 ```sh
-sudo apt install clang-19 ninja-build libhidapi-dev qt6-base-dev libx11-dev libxtst-dev xvfb xauth openbox
+sudo apt install clang-19 ninja-build libhidapi-dev libglib2.0-dev libwayland-dev qt6-base-dev qt6-wayland libx11-dev libxtst-dev xvfb xauth openbox
 python3 -m pip install --user 'cmake>=4.1,<4.2'
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel

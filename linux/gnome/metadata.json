@@ -1,0 +1,8 @@
+{
+  "uuid": "logi-options-open@zybin7890.github.io",
+  "name": "Logi Options Open Desktop Bridge",
+  "description": "Optional third-party experimental bridge for native Wayland application profiles, shortcuts and clipboard actions. Not affiliated with Logitech.",
+  "shell-version": ["46"],
+  "url": "https://github.com/zybin7890/logi-options-open",
+  "version": 1
+}

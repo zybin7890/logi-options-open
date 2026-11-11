@@ -41,6 +41,17 @@ at runtime; these are not redistributed as project assets.
   does not replace those terms. See <https://www.qt.io/licensing/>.
 - API/MCP integration uses Python's standard library. The optional artwork
   generator also uses only the standard library.
+- Native Wayland integration dynamically links system GLib/GIO, libwayland-client
+  and Qt Core/Gui/DBus. The GNOME extension uses the host Shell's APIs; no Shell
+  binaries or source implementation are redistributed.
+- `linux/kde/protocols/wlr-data-control-unstable-v1.xml` retains its upstream
+  permissive copyright and license notice. The generated protocol bindings are
+  part of the native clipboard provider. A copy of this notice is installed with
+  the Linux package.
+- `linux/kde/protocols/fake-input.xml` is KDE's LGPL-2.1-or-later protocol
+  definition and retains its upstream SPDX notice. It is used only by the
+  integration-test event transport, which is not installed or shipped in the
+  application package. Its source remains available in this repository.
 
 Compiler runtimes and any additional libraries linked by a particular Linux
 build retain their own licenses. Consult that build's dependency list when
