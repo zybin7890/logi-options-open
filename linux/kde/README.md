@@ -49,11 +49,18 @@ held. The provider does not treat that signal or an elapsed delay as full releas
 
 Text uses KWin's native `zwlr_data_control_manager_v1` protocol. `SetClipboard`
 returns a serial; the daemon sends Ctrl+V through its normal uinput path.
-`ClipboardConsumed` acknowledges that a recipient requested the UTF-8 MIME payload
-and the provider completed its write to the Wayland data-source FD. The daemon
+`ClipboardConsumed` acknowledges that the native foreground process owns the
+request pipe's read descriptor and the provider completed the UTF-8 payload write.
+The PID comes from KWin; matching uses `/proc/<pid>/fd` and the descriptor's read
+flags. A Klipper prefetch receives the payload but does not acknowledge a paste.
+The daemon
 waits for that acknowledgement before the next text action. The clipboard contents are replaced.
 This acknowledgement proves transfer, not that a specific target document has
 accepted or saved the text. The target still needs to support ordinary paste.
+If the foreground process's descriptors cannot be inspected, Text returns an
+explicit error. Applications that delegate clipboard reads to another process
+are not confirmed by this provider and may time out; no delay is used to guess
+that they consumed the data.
 
 If another application takes clipboard ownership, releasing our sender does not
 clear that application's clipboard. The provider removes only its own selection.

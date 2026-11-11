@@ -52,13 +52,25 @@ int receiver(QApplication& app,const QString& id,const QString& status) {
     Editor editor;editor.setWindowTitle(id);editor.resize(720,440);editor.show();editor.setFocus();
     QTimer timer;QObject::connect(&timer,&QTimer::timeout,[&]{
         const auto* clipboard = QApplication::clipboard()->mimeData();
+        auto widget_state=[](QWidget* widget)->QJsonObject {
+            if(!widget)return {};
+            return {{"class",widget->metaObject()->className()},{"visible",widget->isVisible()},
+                {"focus",widget->hasFocus()},{"title",widget->windowTitle()}};
+        };
+        QJsonArray windows;
+        for(auto* widget:QApplication::topLevelWidgets())windows.append(widget_state(widget));
         write_json(status,{{"platform",QGuiApplication::platformName()},{"id",id},
             {"active",editor.isActiveWindow()},{"focus",editor.hasFocus()},
+            {"popup",widget_state(QApplication::activePopupWidget())},
+            {"modal",widget_state(QApplication::activeModalWidget())},{"windows",windows},
             {"key_events",editor.key_events},{"clipboard_formats",QJsonArray::fromStringList(clipboard ? clipboard->formats() : QStringList{})},
             {"presses",editor.presses},{"releases",int(editor.releases)},
             {"pastes",editor.pastes},{"text",editor.toPlainText()}});
-        if(qEnvironmentVariableIsSet("LOGI_TEST_EVIDENCE"))
+        if(qEnvironmentVariableIsSet("LOGI_TEST_EVIDENCE")) {
             editor.grab().save(qEnvironmentVariable("LOGI_TEST_EVIDENCE")+"/"+id+".png");
+            if(auto* popup=QApplication::activePopupWidget())
+                popup->grab().save(qEnvironmentVariable("LOGI_TEST_EVIDENCE")+"/"+id+"-popup.png");
+        }
     });timer.start(80);return app.exec();
 }
 struct Client {
@@ -170,6 +182,8 @@ int main(int argc,char** argv) {
         desktop.suspend_hotkeys(true);desktop.inject_chord({KEY_LEFTCTRL,KEY_LEFTSHIFT,KEY_F10});
         until("suspended shortcut reaches actual client",[&]{return editor.key_count(Qt::Key_F10)>previous_f10;});
         desktop.suspend_hotkeys(false);require(fired.size()==3,"Synthetic action recursively triggered");
+        desktop.type_text("must-not-dispatch");desktop.cancel_actions();
+        require(!desktop.busy(),"Cancelled native text remained pending");
         const std::string text="Wayland: \xe4\xbd\xa0\xe5\xa5\xbd; (native)\nsecond line";
         desktop.type_text(text);
         until("Unicode text reached real application",[&]{return !desktop.busy()&&editor.state()["pastes"].toArray().size()==1;});

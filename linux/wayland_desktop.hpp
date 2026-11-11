@@ -24,6 +24,7 @@ public:
     void suspend_hotkeys(bool);
     std::vector<std::vector<Action>> poll_hotkeys();
     void type_text(std::string_view);
+    void cancel_actions();
     bool busy() const;
     void inject_chord(const std::vector<unsigned>&);
 };

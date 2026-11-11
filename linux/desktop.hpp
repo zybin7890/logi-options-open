@@ -30,6 +30,9 @@ public:
     // Asynchronous UTF-8 clipboard paste. Changes clipboard contents; target must
     // implement Ctrl+V. busy ends after source data read (not target UI insertion).
     void type_text(std::string_view utf8);
+    // Drop unsent text and local acknowledgement waits. Already emitted input
+    // and clipboard contents cannot be withdrawn from the target application.
+    void cancel_actions();
     bool busy() const;
     // XTEST on X11; supplied native emitter on Wayland.
     void inject_chord(const std::vector<unsigned>& keys);

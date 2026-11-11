@@ -10,7 +10,7 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-19 ninja-build libhidapi-dev libglib2.0-dev qt6-base-dev libgl1-mesa-dev libx11-dev libxtst-dev libwayland-dev libmutter-14-dev gobject-introspection libgirepository1.0-dev xvfb xauth openbox
+          sudo apt-get install -y clang-19 ninja-build libhidapi-dev libglib2.0-dev qt6-base-dev libgl1-mesa-dev libx11-dev libxtst-dev libwayland-dev libmutter-14-dev gobject-introspection libgirepository1.0-dev xvfb xauth x11-utils openbox
           python3 -m pip install 'cmake>=4.1,<4.2'
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=Release
@@ -48,11 +48,11 @@ jobs:
       - name: Native desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-19 ninja-build libhidapi-dev libglib2.0-dev qt6-base-dev qt6-wayland libgl1-mesa-dev libx11-dev libxtst-dev libwayland-dev libmutter-14-dev gobject-introspection libgirepository1.0-dev xvfb xauth dbus-x11 python3-gi acl
+          sudo apt-get install -y --no-install-recommends clang-19 ninja-build libhidapi-dev libglib2.0-dev qt6-base-dev qt6-wayland libgl1-mesa-dev libgl1-mesa-dri libegl-mesa0 libx11-dev libxtst-dev libwayland-dev libmutter-14-dev gobject-introspection libgirepository1.0-dev xvfb xauth dbus-x11 python3-gi acl fuse3
           if [ '${{ matrix.desktop }}' = gnome ]; then
-            sudo apt-get install -y gnome-shell gjs
+            sudo apt-get install -y --no-install-recommends gnome-shell gjs
           else
-            sudo apt-get install -y kwin-wayland kwin-wayland-backend-virtual plasma-workspace libkf5globalaccel-bin qtwayland5
+            sudo apt-get install -y --no-install-recommends kwin-wayland kwin-wayland-backend-virtual plasma-workspace libkf5globalaccel-bin qtwayland5
             command -v klipper
           fi
           python3 -m pip install 'cmake>=4.1,<4.2'

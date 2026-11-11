@@ -14,11 +14,35 @@ template<class F>void until(F check,const char* why){
     for(unsigned attempt=0;attempt<500;++attempt){try{if(check())return;}catch(...){}std::this_thread::sleep_for(std::chrono::milliseconds(10));}
     throw std::runtime_error(why);
 }
+// Simulated asynchronous desktop sink: stage Text until the test permits its
+// dispatch. The daemon/IPC/cancellation path remains the production runtime.
+struct QueuedTextHooks final:RuntimeHooks {
+    std::filesystem::path base;std::vector<std::string> pending;
+    explicit QueuedTextHooks(std::filesystem::path path):base(std::move(path)){}
+    bool busy()const override{return !pending.empty();}
+    void action(const Action& action,const std::filesystem::path&)override{
+        if(action.operation!=Op::text)throw std::runtime_error("Expected fixture Text");
+        pending.push_back(action.text);fixture::append(base.string()+".trace","staged "+action.text);
+    }
+    std::vector<std::vector<Action>> hotkeys()override{
+        if(std::filesystem::exists(base.string()+".release-text")){
+            for(const auto& text:pending)fixture::append(base.string()+".trace","delivered "+text);
+            pending.clear();
+        }
+        return {};
+    }
+    void cancel_actions()override{
+        for(const auto& text:pending)fixture::append(base.string()+".trace","cancelled "+text);
+        pending.clear();
+    }
+};
 struct Child {
     pid_t pid{-1};
-    explicit Child(const std::filesystem::path& config){
+    explicit Child(const std::filesystem::path& config,bool queued_text=false){
         pid=fork();if(pid<0)throw std::runtime_error("Cannot fork daemon fixture");
-        if(pid==0){try{fixture::Device device(config);fixture::Input input(config);fixture::Hooks hooks(config);_exit(run_with(config,device,input,hooks));}catch(...){_exit(1);}}
+        if(pid==0){try{fixture::Device device(config);fixture::Input input(config);
+            if(queued_text){QueuedTextHooks hooks(config);_exit(run_with(config,device,input,hooks));}
+            fixture::Hooks hooks(config);_exit(run_with(config,device,input,hooks));}catch(...){_exit(1);}}
     }
     int join(){int status{};waitpid(pid,&status,0);pid=-1;return WIFEXITED(status)?WEXITSTATUS(status):255;}
     ~Child(){if(pid>0){kill(pid,SIGTERM);waitpid(pid,nullptr,0);}}
@@ -81,6 +105,27 @@ int main(){
         require(has(transact("set dpi 2400"),"2400"),"Reconnected device not usable");
         require(has(transact("stop"),"\"stopped\":true"),"Stop not acknowledged");require(child.join()==0,"Daemon exited unsuccessfully");
         require(!running(),"Daemon left ownership lock held");
+        // Reload/stop must also cancel Text already staged by RuntimeHooks,
+        // not only the daemon's Pending action list.
+        write_file(events,"");Child queued(config,true);
+        until([]{return has(transact("agent-status"),"\"ready\":true");},"Text fixture not ready");
+        write_file(action_file,"[hotkeys]\nCtrl+Alt+F10=Text(CancelOnReload)\n");
+        transact("play-actions "+action_file.string());
+        until([&]{return has(contents(trace),"staged CancelOnReload");},"Text was not staged");
+        require(has(transact("reload "+config.string()),"\"reloaded\":true"),"Text cancellation reload failed");
+        require(has(contents(trace),"cancelled CancelOnReload"),"Reload did not cancel staged desktop Text");
+        write_file(config.string()+".release-text","1");
+        write_file(action_file,"[hotkeys]\nCtrl+Alt+F10=Text(AfterReload)\n");
+        transact("play-actions "+action_file.string());
+        until([&]{return has(contents(trace),"delivered AfterReload");},"Fresh Text did not work after cancellation");
+        require(!has(contents(trace),"delivered CancelOnReload"),"Cancelled Text was dispatched after reload");
+        std::filesystem::remove(config.string()+".release-text");
+        write_file(action_file,"[hotkeys]\nCtrl+Alt+F10=Text(CancelOnStop)\n");
+        transact("play-actions "+action_file.string());
+        until([&]{return has(contents(trace),"staged CancelOnStop");},"Stop Text was not staged");
+        require(has(transact("stop"),"\"stopped\":true"),"Queued Text stop failed");
+        require(queued.join()==0,"Queued Text daemon exited unsuccessfully");
+        require(has(contents(trace),"cancelled CancelOnStop")&&!has(contents(trace),"delivered CancelOnStop"),"Stop failed to cancel staged desktop Text");
         // A restoration failure must be returned to the requester, not masked by
         // a successful stop acknowledgement.
         write_file(events,"");write_file(config,original);Child failure(config);
@@ -89,7 +134,7 @@ int main(){
         try{transact("stop");}catch(...){rejected=true;}require(rejected,"Restoration failure was reported as successful stop");
         require(failure.join()!=0,"Restoration failure did not propagate exit status");
         std::filesystem::remove(config.string()+".restore-fail");
-        std::cout<<"Simulated-device real IPC integration passed: concurrent settings, profile-held release, transactional reload, action timing, disconnect/reconnect, restoration errors.\n";
+        std::cout<<"Simulated-device real IPC integration passed: concurrent settings, profile-held release, transactional reload, action timing, staged Text cancellation on reload/stop, disconnect/reconnect, restoration errors.\n";
         std::filesystem::remove_all(root);return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<" (fixture artifacts: "<<root<<")\n";return 1;}
 }

@@ -50,6 +50,8 @@ export default class OptionsOpenBridge extends Extension {
         this._focus = global.display.connect('notify::focus-window', () => {
             this._dbus.emit_signal('ForegroundChanged', new GLib.Variant('(as)', [this.GetForeground()]));
         });
+        this._stageFocus = GLib.getenv('LOGI_GNOME_TRACE')
+            ? global.stage.connect('notify::key-focus', () => this._traceState('stage focus changed')) : 0;
     }
 
     disable() {
@@ -62,6 +64,8 @@ export default class OptionsOpenBridge extends Extension {
         this._source = null;
         if (this._activation) global.display.disconnect(this._activation);
         if (this._focus) global.display.disconnect(this._focus);
+        if (this._stageFocus) global.stage.disconnect(this._stageFocus);
+        this._stageFocus = 0;
         this._activation = this._focus = 0;
         if (this._busId) Gio.bus_unown_name(this._busId);
         this._busId = 0;
@@ -204,6 +208,7 @@ export default class OptionsOpenBridge extends Extension {
             global.display.get_selection().set_owner(Meta.SelectionType.CLIPBOARD, source);
             if (!source.is_active()) throw new Error('Compositor did not accept clipboard ownership');
             if (GLib.getenv('LOGI_GNOME_TRACE')) console.log(`Logi clipboard: owner serial=${serial} foreground=${this.GetForeground().join(',')}`);
+            this._traceState('clipboard ownership set');
             this._source = source;
             this._sourceOwner = sender;
             return serial;
@@ -259,6 +264,7 @@ export default class OptionsOpenBridge extends Extension {
             Main.popModal(grab); actor.destroy(); return;
         }
         this._pending = {...binding, actor, grab, keycode: event.get_key_code(), released: false};
+        this._traceState(`shortcut activated ${binding.token} keycode=${this._pending.keycode}`);
         actor.connect('key-release-event', (_actor, release) => {
             if (!this._pending) return Clutter.EVENT_STOP;
             if (release.get_key_code() === this._pending.keycode) this._pending.released = true;
@@ -295,7 +301,16 @@ export default class OptionsOpenBridge extends Extension {
         if (!this._pending) return;
         const {grab, actor} = this._pending;
         this._pending = null;
+        this._traceState('before popModal');
         Main.popModal(grab);
         actor.destroy();
+        this._traceState('after popModal');
+    }
+
+    _traceState(label) {
+        if (!GLib.getenv('LOGI_GNOME_TRACE')) return;
+        console.log(`Logi focus: ${label}; modalCount=${Main.modalCount}; actionMode=${Main.actionMode}; ` +
+            `stageFocus=${global.stage.get_key_focus()}; window=${global.display.focus_window?.get_wm_class()}; ` +
+            `pending=${this._pending?.token ?? 'none'}; actor=${this._pending?.actor ?? 'none'}`);
     }
 }

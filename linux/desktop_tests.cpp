@@ -176,6 +176,22 @@ int main() {
         desktop.type_text("one");desktop.type_text("two");
         until("ordered text queue received",desktop,receiver,[&]{return !desktop.busy() && receiver.pasted.size()==3;},fired);
         require(receiver.pasted[1]=="one" && receiver.pasted[2]=="two","Text queue reordered payloads");
+        desktop.type_text("discard-before-dispatch");desktop.cancel_actions();
+        require(!desktop.busy(),"Cancelled unsent Text remained busy");
+        desktop.type_text("fresh-after-cancel");
+        until("new text after unsent cancellation",desktop,receiver,[&]{return !desktop.busy()&&receiver.pasted.size()==4;},fired);
+        require(receiver.pasted.back()=="fresh-after-cancel","Cancelled unsent Text was injected");
+        // The first chord is already sent and cannot be recalled. Cancel its
+        // acknowledgement wait plus the second, not-yet-dispatched text.
+        desktop.type_text("already-dispatched");desktop.poll_hotkeys();
+        require(desktop.busy(),"Expected an in-flight clipboard request");
+        desktop.type_text("discard-following");desktop.cancel_actions();
+        require(!desktop.busy(),"Cancelled clipboard wait remained busy");
+        until("already dispatched text may finish",desktop,receiver,[&]{return receiver.pasted.size()==5;},fired);
+        require(receiver.pasted.back()=="already-dispatched","Cancellation altered already dispatched clipboard contents");
+        desktop.type_text("fresh-after-late-read");
+        until("new text after late cancelled read",desktop,receiver,[&]{return !desktop.busy()&&receiver.pasted.size()==6;},fired);
+        require(receiver.pasted.back()=="fresh-after-late-read","Cancelled queued Text survived a late read");
         require(receiver.modifiers_up(),"Text left modifiers down");
         require(receiver.focus>=2 && receiver.release>0,"Focus/key release events not observed");
 

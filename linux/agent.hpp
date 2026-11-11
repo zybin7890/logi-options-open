@@ -41,6 +41,7 @@ struct RuntimeHooks {
     virtual std::vector<std::string> foreground(){return {};}
     virtual std::vector<std::vector<Action>> hotkeys(){return {};}
     virtual bool busy() const{return false;}
+    virtual void cancel_actions(){}
     virtual void suspend_hotkeys(bool){}
     virtual void action(const Action&,const std::filesystem::path&);
 };

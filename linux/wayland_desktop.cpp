@@ -140,7 +140,8 @@ struct WaylandDesktop::Impl {
             const char* token{};g_variant_get(values,"(&s)",&token);
             if(!self.suspended && self.triggers.contains(token) && self.triggered.size()<128)self.triggered.emplace_back(token);
         }else if(std::string_view(name)=="ClipboardConsumed" && g_variant_is_of_type(values,G_VARIANT_TYPE("(u)"))) {
-            guint32 serial{};g_variant_get(values,"(u)",&serial);if(self.consumed.size()<128)self.consumed.insert(serial);
+            guint32 serial{};g_variant_get(values,"(u)",&serial);
+            if(serial && serial==self.paste_serial)self.consumed.insert(serial);
         }else if(std::string_view(name)=="ForegroundChanged" && g_variant_is_of_type(values,G_VARIANT_TYPE("(as)"))) {
             gchar** identities{};g_variant_get(values,"(^as)",&identities);self.foreground_cache.clear();
             for(auto item=identities;item && *item;++item){auto value=normalized(*item);if(!value.empty() && std::ranges::find(self.foreground_cache,value)==self.foreground_cache.end())self.foreground_cache.push_back(std::move(value));}
@@ -233,6 +234,9 @@ void WaylandDesktop::type_text(std::string_view text) {
     if(!impl_->clipboard || !impl_->clipboard_ack || !impl_->emit)throw std::runtime_error("Native clipboard/uinput integration is unavailable");
     if(text.empty() || text.size()>8192 || text.find('\0')!=text.npos || !g_utf8_validate(text.data(),static_cast<gssize>(text.size()),nullptr))throw std::runtime_error("Invalid UTF-8 Text payload");
     if(impl_->texts.size()>=64)throw std::runtime_error("Text queue is full");impl_->texts.emplace_back(text);
+}
+void WaylandDesktop::cancel_actions() {
+    impl_->texts.clear();impl_->paste_serial=0;impl_->consumed.clear();
 }
 bool WaylandDesktop::busy()const{return !impl_->texts.empty() || impl_->paste_serial!=0;}
 void WaylandDesktop::inject_chord(const std::vector<unsigned>& keys) {

@@ -2,6 +2,8 @@
 #include "wlr-data-control-unstable-v1-client-protocol.h"
 #include <QSocketNotifier>
 #include <QTimer>
+#include <QDir>
+#include <QFile>
 #include <wayland-client.h>
 #include <algorithm>
 #include <cerrno>
@@ -9,7 +11,30 @@
 #include <fcntl.h>
 #include <stdexcept>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <vector>
+
+namespace {
+// Wayland's source.send callback does not name its recipient. Match its pipe to
+// a read descriptor owned by the native foreground process before writing it.
+// A clipboard manager may fetch the same source, but must not advance Text.
+bool targetOwnsReadEnd(int pipe,quint64 pid) {
+    struct stat offered{};
+    if(::fstat(pipe,&offered)!=0 || !S_ISFIFO(offered.st_mode))return false;
+    const QString root="/proc/"+QString::number(pid);
+    for(const auto& name:QDir(root+"/fd").entryList(QDir::Files|QDir::System|QDir::NoDotAndDotDot)) {
+        struct stat candidate{};
+        const auto path=(root+"/fd/"+name).toLocal8Bit();
+        if(::stat(path.constData(),&candidate)!=0 || candidate.st_dev!=offered.st_dev || candidate.st_ino!=offered.st_ino)continue;
+        QFile info(root+"/fdinfo/"+name);if(!info.open(QIODevice::ReadOnly))continue;
+        for(const auto& line:info.readAll().split('\n'))if(line.startsWith("flags:")) {
+            bool ok{};const auto flags=line.mid(6).trimmed().toUInt(&ok,8);
+            if(ok && (flags&O_ACCMODE)==O_RDONLY)return true;
+        }
+    }
+    return false;
+}
+}
 
 struct WaylandClipboard::Impl {
     WaylandClipboard* owner;
@@ -22,14 +47,16 @@ struct WaylandClipboard::Impl {
     QString error;
     quint32 serial{};
     struct Source {
-        Impl* parent{};zwlr_data_control_source_v1* source{};QByteArray text;quint32 serial{};bool reported{};
+        Impl* parent{};zwlr_data_control_source_v1* source{};QByteArray text;quint32 serial{};quint64 targetPid{};bool reported{};
         ~Source(){if(source)zwlr_data_control_source_v1_destroy(source);}
     };
     std::vector<std::shared_ptr<Source>> sources;
     Source* current{};
     struct Transfer final : QObject {
-        int fd{-1};QByteArray text;qsizetype offset{};std::shared_ptr<Source> source;QSocketNotifier* notifier{};QTimer timeout;
+        int fd{-1};QByteArray text;qsizetype offset{};std::shared_ptr<Source> source;QSocketNotifier* notifier{};QTimer timeout;bool target{};
         Transfer(int descriptor,std::shared_ptr<Source> from,WaylandClipboard* owner):QObject(owner),fd(descriptor),text(from->text),source(std::move(from)) {
+            target=targetOwnsReadEnd(fd,source->targetPid);
+            if(qEnvironmentVariableIsSet("LOGI_KDE_TRACE"))qInfo("Clipboard transfer serial=%u target-pid=%llu target-read-end=%s",source->serial,static_cast<unsigned long long>(source->targetPid),target?"yes":"no");
             fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK);
             notifier=new QSocketNotifier(fd,QSocketNotifier::Write,this);
             connect(notifier,&QSocketNotifier::activated,this,[this]{writeReady();});
@@ -46,7 +73,7 @@ struct WaylandClipboard::Impl {
                 deleteLater();return;
             }
             notifier->setEnabled(false);::close(fd);fd=-1;
-            if(!source->reported){source->reported=true;emit source->parent->owner->consumed(source->serial);}
+            if(target && !source->reported){source->reported=true;emit source->parent->owner->consumed(source->serial);}
             deleteLater();
         }
     };
@@ -90,10 +117,12 @@ WaylandClipboard::WaylandClipboard(QObject* parent):QObject(parent),impl_(std::m
 WaylandClipboard::~WaylandClipboard(){qDeleteAll(children());}
 bool WaylandClipboard::available()const{return impl_->error.isEmpty() && impl_->device;}
 QString WaylandClipboard::reason()const{return impl_->error;}
-quint32 WaylandClipboard::setText(const QString& text) {
+quint32 WaylandClipboard::setText(const QString& text,quint64 targetPid) {
     if(!available())throw std::runtime_error(reason().toStdString());
+    if(!targetPid || QDir("/proc/"+QString::number(targetPid)+"/fd").entryList(QDir::Files|QDir::System|QDir::NoDotAndDotDot).isEmpty())
+        throw std::runtime_error("Native foreground process descriptors are unavailable; cannot confirm paste delivery");
     const auto utf8=text.toUtf8();if(utf8.isEmpty() || utf8.size()>8192)throw std::runtime_error("Clipboard text must contain 1..8192 UTF-8 bytes");
-    auto source=std::make_shared<Impl::Source>();source->parent=impl_.get();source->text=utf8;source->serial=++impl_->serial;
+    auto source=std::make_shared<Impl::Source>();source->parent=impl_.get();source->text=utf8;source->serial=++impl_->serial;source->targetPid=targetPid;
     source->source=zwlr_data_control_manager_v1_create_data_source(impl_->manager);
     static const zwlr_data_control_source_v1_listener listener{
         [](void* data,zwlr_data_control_source_v1*,const char* mime,int fd){

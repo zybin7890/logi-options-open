@@ -308,6 +308,10 @@ void Desktop::type_text(std::string_view text) {
     if(impl_->texts.size()>=64)throw std::runtime_error("Text queue is full");
     impl_->texts.emplace_back(text);
 }
+void Desktop::cancel_actions() {
+    if(impl_->wayland){impl_->wayland->cancel_actions();return;}
+    impl_->texts.clear();impl_->paste_pending=false;
+}
 bool Desktop::busy()const{return impl_->wayland?impl_->wayland->busy():!impl_->texts.empty() || impl_->paste_pending;}
 void Desktop::inject_chord(const std::vector<unsigned>& keys) {
     if(impl_->wayland){impl_->wayland->inject_chord(keys);return;}

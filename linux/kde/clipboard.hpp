@@ -13,10 +13,11 @@ public:
     ~WaylandClipboard() override;
     bool available() const;
     QString reason() const;
-    quint32 setText(const QString& text);
+    quint32 setText(const QString& text,quint64 targetPid);
     void clear();
 signals:
-    // The source completed a real MIME-data transfer. This is not an assertion
+    // The native foreground process requested and received the MIME payload.
+    // Clipboard-manager prefetch is deliberately excluded. This is not an assertion
     // that the destination application inserted the text into its document.
     void consumed(quint32 serial);
 };

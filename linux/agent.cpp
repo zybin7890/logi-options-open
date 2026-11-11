@@ -253,6 +253,7 @@ public:
     std::vector<std::string> foreground()override{return desktop.foreground();}
     std::vector<std::vector<Action>> hotkeys()override{return desktop.poll_hotkeys();}
     bool busy()const override{return desktop.busy();}
+    void cancel_actions()override{desktop.cancel_actions();}
     void suspend_hotkeys(bool value)override{desktop.suspend_hotkeys(value);}
     void action(const Action& action,const std::filesystem::path& config)override{
         if(action.operation==Op::text){desktop.type_text(action.text);return;}
@@ -317,7 +318,7 @@ int run_with(const std::filesystem::path& config_file,DeviceBackend& device,Inpu
     auto key_down=[&](unsigned key){if(held_counts[key]++==0)input.key(key,true);input.sync();};
     auto key_up=[&](unsigned key){auto it=held_counts.find(key);if(it!=held_counts.end()&&--it->second==0){input.key(key,false);held_counts.erase(it);}input.sync();};
     auto release=[&]{for(const auto& [key,count]:held_counts)input.key(key,false);held_counts.clear();input.sync();state.clear();wheel={};};
-    auto cancel=[&](const std::string& why){if(!pending.empty())last_action_error=why;pending.clear();release();};
+    auto cancel=[&](const std::string& why){if(!pending.empty()||hooks.busy())last_action_error=why;pending.clear();hooks.cancel_actions();release();};
     auto queue=[&](std::vector<Action> sequence){if(pending.size()>=128)throw std::runtime_error("Action queue is full");const auto id=next_action++;pending.push_back({std::move(sequence),0,Clock::now(),id});return id;};
     auto choose=[&](Binding binding,const std::vector<std::string>& context){if(auto found=lookup(config,binding,context))return *found;return binding.second==Direction::tap?fallback(binding.first):std::vector<Action>{};};
     auto execute=[&](const Action& action){
@@ -390,7 +391,7 @@ int run_with(const std::filesystem::path& config_file,DeviceBackend& device,Inpu
                 retry=Clock::now()+std::chrono::seconds(1);
             }
             try{for(auto& sequence:hooks.hotkeys())if(ready)queue(std::move(sequence));}
-            catch(const std::exception& error){last_action_error=error.what();pending.clear();release();}
+            catch(const std::exception& error){last_action_error=error.what();pending.clear();hooks.cancel_actions();release();}
             hooks.suspend_hotkeys(!pending.empty()||hooks.busy());
             auto now=Clock::now();unsigned timeout=20;
             if(ready&&!hooks.busy()){

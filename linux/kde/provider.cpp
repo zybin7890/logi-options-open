@@ -134,9 +134,9 @@ public slots:
         add(app);add(instance);add(desktop.endsWith(".desktop")?desktop.chopped(8):desktop);
         bool ok{};const auto pid=process.toULongLong(&ok);
         if(ok && pid)add(QFileInfo(QFileInfo("/proc/"+QString::number(pid)+"/exe").symLinkTarget()).fileName());
-        emit updated(identities);
+        emit updated(identities,ok?pid:0);
     }
-signals:void updated(const QStringList& identities);
+signals:void updated(const QStringList& identities,quint64 pid);
 };
 
 class Provider final : public QObject,protected QDBusContext {
@@ -148,6 +148,7 @@ class Provider final : public QObject,protected QDBusContext {
     QString scriptName="logi-options-open-"+instance;
     QTemporaryDir scriptDirectory;
     QStringList foreground;
+    quint64 foregroundPid{};
     bool foregroundReady{},scriptLoaded{};
     KeyboardState keyboard;
     WaylandClipboard clipboard;
@@ -221,7 +222,7 @@ public:
     Provider():clipboard(this),watcher(this) {
         watcher.setConnection(QDBusConnection::sessionBus());watcher.setWatchMode(QDBusServiceWatcher::WatchForUnregistration);
         connect(&watcher,&QDBusServiceWatcher::serviceUnregistered,this,[this](const QString& owner){releaseOwner(owner);});
-        connect(&callback,&ForegroundCallback::updated,this,[this](const QStringList& ids){foregroundReady=true;if(foreground!=ids){foreground=ids;emit ForegroundChanged(ids);}});
+        connect(&callback,&ForegroundCallback::updated,this,[this](const QStringList& ids,quint64 pid){foregroundReady=true;foregroundPid=pid;if(foreground!=ids){foreground=ids;emit ForegroundChanged(ids);}});
         connect(&clipboard,&WaylandClipboard::consumed,this,[this](quint32 serial){if(auto it=clipboardOwners.find(serial);it!=clipboardOwners.end()){emitTo(it.value(),"ClipboardConsumed",{serial});clipboardOwners.erase(it);}});
         auto bus=QDBusConnection::sessionBus();
         if(!bus.registerObject(callback_path,&callback,QDBusConnection::ExportAllSlots))throw std::runtime_error("Cannot register KWin callback object");
@@ -298,7 +299,7 @@ public slots:
         }catch(const std::exception& e){report(e);}
     }
     quint32 SetClipboard(const QString& text) {
-        try{client(sender());const auto serial=clipboard.setText(text);clipboardOwners.insert(serial,sender());activeClipboardOwner=sender();return serial;}
+        try{client(sender());const auto serial=clipboard.setText(text,foregroundPid);clipboardOwners.insert(serial,sender());activeClipboardOwner=sender();return serial;}
         catch(const std::exception& e){report(e);return 0;}
     }
     void Release(){releaseOwner(sender());}

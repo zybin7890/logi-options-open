@@ -80,7 +80,7 @@ if [[ "${LOGI_TEST_ALLOW_DEVICE_ACL:-}" == 1 ]]; then
 fi
 "$bindir/logi-kde-input-forwarder" >"$evidence/kde-input-transport.log" 2>&1 &
 pids+=("$!")
-"$bindir/logi-kde-provider" >"$evidence/kde-provider.log" 2>&1 &
+LOGI_KDE_TRACE=1 "$bindir/logi-kde-provider" >"$evidence/kde-provider.log" 2>&1 &
 provider_pid="$!"; pids+=("$provider_pid")
 ready=0
 for ((i=0; i<200; ++i)); do
