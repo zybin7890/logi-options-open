@@ -68,6 +68,17 @@ QString readFile(const QString& path) {
     QFile file(path);
     return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString{};
 }
+const QMap<QString,QString>& builtInNames(){
+    static const QMap<QString,QString> names{{"MouseMiddle",QStringLiteral("中键")},{"MouseBack",QStringLiteral("后退")},
+        {"MouseForward",QStringLiteral("前进")},{"WheelMode",QStringLiteral("切换滚轮模式")},{"VolumeUp",QStringLiteral("提高音量")},
+        {"VolumeDown",QStringLiteral("降低音量")},{"Mute",QStringLiteral("静音")},{"PlayPause",QStringLiteral("播放 / 暂停")},
+        {"NextTrack",QStringLiteral("下一曲")},{"PreviousTrack",QStringLiteral("上一曲")},{"Ring",QStringLiteral("Actions Ring")},
+        {"None",QStringLiteral("无操作")}};return names;
+}
+QString builtInCode(const QString& label){
+    for(auto it=builtInNames().cbegin();it!=builtInNames().cend();++it)if(it.value()==label)return it.key();
+    return label;
+}
 
 QMap<QString, QString> globalBindings(const QString& text, const QString& section = QStringLiteral("global")) {
     QMap<QString, QString> result;
@@ -274,7 +285,9 @@ public:
             "QMainWindow,QWidget{background:#1a1a1a;color:#eeeeee;font-size:15px;}"
             "QTabWidget::pane{border:0;}QPushButton[navigation=true]{text-align:left;border:0;background:transparent;padding:12px;}"
             "QPushButton[navigation=true]:checked{color:#00d8c6;background:#222222;}"
-            "QWidget#drawer{background:#101010;}QLabel#battery{background:#101010;color:#8fe34a;border-radius:5px;padding:12px;}"
+            "QWidget#drawer,QWidget#drawer QWidget{background:#101010;}QWidget#drawer QLabel{background:transparent;}"
+            "QWidget#drawer QComboBox,QWidget#drawer QSpinBox,QWidget#drawer QPushButton{background:#242424;}"
+            "QLabel#battery{background:#101010;color:#8fe34a;border-radius:5px;padding:12px;}"
             "QGroupBox{border:1px solid #3b4040;border-radius:8px;}"
             "QGroupBox{margin-top:14px;padding:18px;}QGroupBox::title{subcontrol-origin:margin;left:12px;}"
             "QPushButton,QComboBox,QSpinBox{background:#292d2c;border:1px solid #4c5553;border-radius:5px;padding:8px;}"
@@ -390,7 +403,7 @@ private:
     }
     void rebuildProfiles() {
         if(!profileBar_)return;
-        while(auto* item=profileBar_->takeAt(0)){if(auto* widget=item->widget())widget->deleteLater();delete item;}
+        while(auto* item=profileBar_->takeAt(0)){if(auto* widget=item->widget()){widget->hide();widget->deleteLater();}delete item;}
         profileBar_->addStretch();
         if(!pages_ || (pages_->currentIndex()!=0 && pages_->currentIndex()!=1 && pages_->currentIndex()!=2))return;
         const int count=pages_->currentIndex()==0?1:profile_->count();
@@ -630,7 +643,7 @@ private:
             {QStringLiteral("输入文本"),"Text"},{QStringLiteral("打开文件或网址"),"Open"},{QStringLiteral("系统操作"),"Built-in"}})
             choice->addItem(pair.first,pair.second);
         choice->setCurrentIndex(choice->findData(type)); steps_->setCellWidget(row, 0, choice);
-        auto* input = new QLineEdit(value, steps_); steps_->setCellWidget(row, 1, input);
+        auto* input = new QLineEdit(type==QStringLiteral("Built-in")?builtInNames().value(value,value):value, steps_); steps_->setCellWidget(row, 1, input);
         input->setPlaceholderText(type == QStringLiteral("Wait") ? QStringLiteral("毫秒，例如 400") : QStringLiteral("操作内容"));
         steps_->setRowHeight(row, 66);
         connect(input, &QLineEdit::textEdited, this, [this] { updateSmart(); });
@@ -651,11 +664,12 @@ private:
             auto value = static_cast<QLineEdit*>(steps_->cellWidget(row, 1))->text();
             if (type == QStringLiteral("Text")) {
                 QString encoded;
-                for (const auto unit : value) encoded += QStringLiteral("%1").arg(unit.unicode(), 4, 16, QLatin1Char('0'));
+                for (const auto unit : value) encoded += QStringLiteral("%1").arg(static_cast<unsigned>(unit.unicode()), 4, 16, QLatin1Char('0'));
                 value = QStringLiteral("TextHex(") + encoded + ')';
             } else if (type == QStringLiteral("Wait") || type == QStringLiteral("Open"))
                 value = type + '(' + value + ')';
             else if(type==QStringLiteral("Shortcut"))value=loo_ui::platform::actionShortcut(value);
+            else if(type==QStringLiteral("Built-in"))value=builtInCode(value);
             result.push_back(value);
         }
         return result.isEmpty() ? QStringLiteral("None") : result.join(';');

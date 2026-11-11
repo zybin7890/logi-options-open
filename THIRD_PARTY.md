@@ -34,9 +34,13 @@ at runtime; these are not redistributed as project assets.
 - Windows builds link Windows SDK system libraries, including HID, SetupAPI,
   GDI+ and the native controls API. These are supplied by Windows, not relicensed
   under this project's MIT license.
-- The native Linux UI uses Qt 6 Widgets. Qt is an external dependency available
+- The shared Windows and Linux native UI uses Qt 6 Widgets. Qt is a dependency available
   under its own commercial and open-source terms, including LGPL/GPL options.
-  This repository does not vendor Qt. A distributor of binaries must follow the
+  This repository does not vendor Qt source. Windows packages dynamically bundle
+  the Qt runtime; Linux packages use the distribution's Qt runtime. The Qt DLLs
+  can be replaced with ABI-compatible builds; UI source is included in this repository.
+  Qt source is available from <https://download.qt.io/archive/qt/>.
+  A distributor of binaries must follow the
   terms of the particular Qt libraries they distribute; the project license
   does not replace those terms. See <https://www.qt.io/licensing/>.
 - API/MCP integration uses Python's standard library. The optional artwork
