@@ -110,8 +110,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (command == L"agent-status" && argc == 2) {
-        std::printf("{\"native\":%s,\"options_plus\":%s}\n",
-                    json_boolean(agent_running()), json_boolean(options_running()));
+        print_agent_status();
         return 0;
     }
 

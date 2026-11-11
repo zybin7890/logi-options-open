@@ -6,6 +6,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cwchar>
 #include <filesystem>
@@ -18,6 +19,26 @@ namespace {
 constexpr auto stop_name = L"Local\\LogiNative.Stop";
 constexpr auto mutex_name = L"Local\\LogiNative.Agent";
 constexpr auto speed_name = L"Local\\LogiNative.ThumbSpeed.v1";
+constexpr auto health_name = L"Local\\LogiNative.Health.v1";
+struct alignas(8) AgentHealth {
+    LONG pid{},ready{},connections{},repairs{},failures{},input_failures{};
+    LONG64 checked{},events{},last_event{};
+};
+AgentHealth* health{};
+struct LiveHealth {
+    HANDLE mapping{};
+    LiveHealth() {
+        mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(AgentHealth),health_name);
+        if(mapping)health=static_cast<AgentHealth*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(AgentHealth)));
+        if(health){*health={};health->pid=static_cast<LONG>(GetCurrentProcessId());}
+    }
+    ~LiveHealth(){if(health){InterlockedExchange(&health->ready,0);UnmapViewOfFile(health);health=nullptr;}if(mapping)CloseHandle(mapping);}
+};
+UINT send_input(UINT count,INPUT* events,int size) {
+    const auto sent=SendInput(count,events,size);
+    if(sent!=count && health)InterlockedIncrement(&health->input_failures);
+    return sent;
+}
 LONG* live_thumb_speed{};
 struct LiveThumbSpeed {
     HANDLE mapping{};
@@ -466,7 +487,7 @@ void scroll(int horizontal, int vertical) {
     UINT count = 0;
     if (horizontal) inputs[count++] = wheel_input(MOUSEEVENTF_HWHEEL, horizontal);
     if (vertical) inputs[count++] = wheel_input(MOUSEEVENTF_WHEEL, vertical);
-    if (count && SendInput(count, inputs, sizeof(INPUT)) != count)
+    if (count && send_input(count, inputs, sizeof(INPUT)) != count)
         std::fputs("Windows rejected scroll input.\n", stderr);
 }
 
@@ -481,10 +502,10 @@ void zoom(int direction) {
     inputs[1] = wheel_input(MOUSEEVENTF_WHEEL, direction);
     inputs[2] = inputs[0];
     inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    const auto sent = SendInput(3, inputs, sizeof(INPUT));
+    const auto sent = send_input(3, inputs, sizeof(INPUT));
     if (sent == 3) return;
     // SendInput may accept a prefix of the batch. Release our own Ctrl press.
-    if (sent) SendInput(1, &inputs[2], sizeof(INPUT));
+    if (sent) send_input(1, &inputs[2], sizeof(INPUT));
     std::fputs("Windows rejected zoom input.\n", stderr);
 }
 
@@ -527,7 +548,7 @@ void execute(const Action& action, logi::Mouse* device) {
             inputs[i * 2 + 1] = inputs[i * 2];
             inputs[i * 2 + 1].ki.dwFlags |= KEYEVENTF_KEYUP;
         }
-        if (SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT)) != inputs.size())
+        if (send_input(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT)) != inputs.size())
             std::fputs("Windows rejected some Unicode input.\n", stderr);
         return;
     }
@@ -547,7 +568,7 @@ void execute(const Action& action, logi::Mouse* device) {
         events[1].mi.dwFlags = mouse == VK_MBUTTON ? MOUSEEVENTF_MIDDLEUP : MOUSEEVENTF_XUP;
         if (mouse != VK_MBUTTON)
             events[0].mi.mouseData = events[1].mi.mouseData = mouse == VK_XBUTTON1 ? XBUTTON1 : XBUTTON2;
-        if (SendInput(2, events, sizeof(INPUT)) != 2)
+        if (send_input(2, events, sizeof(INPUT)) != 2)
             std::fputs("Windows rejected mouse input.\n", stderr);
         return;
     }
@@ -569,7 +590,7 @@ void execute(const Action& action, logi::Mouse* device) {
         event.ki.wVk = pressed[count - i - 1];
         event.ki.dwFlags = KEYEVENTF_KEYUP | (extended(event.ki.wVk) ? KEYEVENTF_EXTENDEDKEY : 0);
     }
-    if (SendInput(count * 2, events, sizeof(INPUT)) != count * 2)
+    if (send_input(count * 2, events, sizeof(INPUT)) != count * 2)
         std::fputs("Windows rejected some shortcut input.\n", stderr);
 }
 
@@ -750,6 +771,60 @@ bool restore(logi::Mouse& mouse, const std::vector<Control>& controls, const std
     return restored;
 }
 
+// A Bolt receiver remains attached when its wireless mouse sleeps/reconnects.
+// Therefore an outstanding ReadFile is not proof that diversion is still set.
+// Read back the actual device state; only write a control that lost its flags.
+bool check_reporting(logi::Mouse& mouse,std::vector<Control>& controls,std::optional<Wheel>& wheel) {
+    bool repaired=false;
+    const auto failed=[](const char* operation,const logi::Reply& reply,unsigned control=0){
+        std::fprintf(stderr,"Reporting check detail: %s control=%04X result=%u error=%u report=%u data=%02X%02X%02X.\n",
+            operation,control,static_cast<unsigned>(reply.result),reply.error,reply.packet.size,
+            reply.packet.bytes[4],reply.packet.bytes[5],reply.packet.bytes[6]);
+        return false;
+    };
+    if(mouse.wheel) {
+        auto current=mouse.channel->request(mouse.device.slot,mouse.wheel,1,{},1200);
+        if(!current)return failed("main-wheel",current);
+        if(current.packet.data()[0]&1) {
+            const auto mode=static_cast<logi::Byte>(current.packet.data()[0]&~1);
+            if(!mouse.channel->request(mouse.device.slot,mouse.wheel,2,{mode},300))return false;
+            current=mouse.channel->request(mouse.device.slot,mouse.wheel,1,{},300);
+            if(!current || (current.packet.data()[0]&1))return false;
+            repaired=true;std::fputs("Recovered standard main wheel reporting.\n",stderr);
+        }
+    }
+    for(auto& control:controls) {
+        const auto high=logi::high(control.id),low=logi::low(control.id);
+        const auto wanted=static_cast<logi::Byte>(control.xy?0x11:0x01);
+        auto current=mouse.channel->request(mouse.device.slot,mouse.buttons,2,{high,low},300);
+        if(!current || current.packet.size<7 || logi::word(current.packet.data())!=control.id)return failed("button",current,control.id);
+        if((current.packet.data()[2]&0x11)==wanted)continue;
+        if(health)InterlockedExchange(&health->ready,0);
+        const auto flags=static_cast<logi::Byte>(control.xy?0x33:0x23);
+        if(!mouse.channel->request(mouse.device.slot,mouse.buttons,3,{high,low,flags},300))return false;
+        current=mouse.channel->request(mouse.device.slot,mouse.buttons,2,{high,low},300);
+        if(!current || logi::word(current.packet.data())!=control.id || (current.packet.data()[2]&0x11)!=wanted)return false;
+        control.down=false;control.panning=false;control.x=control.y=0;repaired=true;
+        std::fprintf(stderr,"Recovered reporting for control %04X.\n",control.id);
+    }
+    if(wheel) {
+        auto current=mouse.channel->request(mouse.device.slot,mouse.thumb,1,{},300);
+        if(!current)return failed("thumb-wheel",current);
+        if(current.packet.data()[0]!=1 || (current.packet.data()[1]&1)) {
+            if(health)InterlockedExchange(&health->ready,0);
+            if(!mouse.channel->request(mouse.device.slot,mouse.thumb,2,{1,0},300))return false;
+            current=mouse.channel->request(mouse.device.slot,mouse.thumb,1,{},300);
+            if(!current || current.packet.data()[0]!=1 || (current.packet.data()[1]&1))return false;
+            wheel->previous=nullptr;wheel->remainder=0;repaired=true;
+            std::fputs("Recovered thumb wheel reporting.\n",stderr);
+        }
+    }
+    if(health){InterlockedExchange64(&health->checked,static_cast<LONG64>(GetTickCount64()));
+        if(repaired)InterlockedIncrement(&health->repairs);
+        InterlockedExchange(&health->ready,1);}
+    return true;
+}
+
 std::map<unsigned,bool> control_layout(const Mappings& mappings) {
     std::map<unsigned,bool> layout;
     for (const auto& binding:mappings.bindings)
@@ -784,8 +859,29 @@ void events(logi::Mouse& mouse, std::vector<Control>& controls, std::optional<Wh
     Foreground foreground;
     std::vector<std::size_t> pending;
     if (mouse.channel) mouse.channel->keep_notifications();
+    auto next_check=GetTickCount64()+3000;
+    LASTINPUTINFO last_input{sizeof(LASTINPUTINFO),0};
+    GetLastInputInfo(&last_input);
+    auto activity=last_input.dwTime;
+    LONG64 last_checked_event{};
     for (;;) {
         if (WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0) return;
+        if(mouse.channel && GetTickCount64()>=next_check) {
+            GetLastInputInfo(&last_input);
+            const auto device_events=health?std::atomic_ref<LONG64>(health->events).load(std::memory_order_relaxed):0;
+            const bool active=last_input.dwTime!=activity || device_events!=last_checked_event;
+            activity=last_input.dwTime;last_checked_event=device_events;
+            // Do not wake a sleeping wireless mouse just to poll it. Check after
+            // resumed normal input or a HID++ event, including standard movement
+            // when custom button reporting was reset and no HID++ event arrives.
+            if(active && !check_reporting(mouse,controls,wheel)) {
+                if(WaitForSingleObject(stop_event,0)==WAIT_OBJECT_0)return;
+                if(health){InterlockedExchange(&health->ready,0);InterlockedIncrement(&health->failures);}
+                std::fputs("Device reporting check failed; reconnecting without exiting the agent.\n",stderr);
+                return;
+            }
+            next_check=GetTickCount64()+3000;
+        }
         if (path && WaitForSingleObject(reload_event,0)==WAIT_OBJECT_0) {
             ResetEvent(reload_event);
             Mappings next;
@@ -828,6 +924,7 @@ void events(logi::Mouse& mouse, std::vector<Control>& controls, std::optional<Wh
         }
         if (!hotkeys.empty()) dispatch_hotkeys(hotkeys, pending, sequences, mouse);
         auto timeout = sequences.service(mouse);
+        if(mouse.channel){const auto now=GetTickCount64();timeout=std::min<DWORD>(timeout,static_cast<DWORD>(next_check>now?next_check-now:0));}
         if (!pending.empty()) timeout = std::min<DWORD>(timeout, 16);
         if (!mouse.channel) {
             const HANDLE signals[]{stop_event,reload_event};
@@ -837,11 +934,21 @@ void events(logi::Mouse& mouse, std::vector<Control>& controls, std::optional<Wh
         }
         const auto reply = mouse.channel->read(timeout, !hotkeys.empty(),reload_event);
         if (reply.result == logi::Result::timeout || reply.result == logi::Result::hotkey || reply.result==logi::Result::reload) continue;
-        if (!reply) return;
+        if (!reply) {
+            if(health)InterlockedExchange(&health->ready,0);
+            if(reply.result!=logi::Result::stopped){
+                if(health)InterlockedIncrement(&health->failures);
+                std::fprintf(stderr,"HID read ended (%u); reconnecting.\n",static_cast<unsigned>(reply.result));
+            }
+            return;
+        }
         const auto& packet = reply.packet;
         if (packet.size != 20 || packet.bytes[1] != mouse.device.slot) continue;
         const auto data = packet.data();
         const auto event = packet.bytes[3];
+        if(health && !(event&15) && (packet.bytes[2]==mouse.thumb || packet.bytes[2]==mouse.buttons)) {
+            InterlockedIncrement64(&health->events);InterlockedExchange64(&health->last_event,static_cast<LONG64>(GetTickCount64()));
+        }
         if (wheel && packet.bytes[2] == mouse.thumb && event == 0) {
             const auto rotation = static_cast<std::int16_t>(logi::word(data));
             if (!rotation) continue;
@@ -974,6 +1081,10 @@ public:
 
     void restore() {
         if (restart_.empty() || options_running()) return;
+        if(!std::filesystem::exists(restart_)) {
+            std::puts("Previously paused Options+ was uninstalled; standalone input restored.");
+            restart_.clear();return;
+        }
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
         startup.dwFlags = STARTF_USESHOWWINDOW;
@@ -1018,6 +1129,20 @@ bool agent_running() {
     if (!event) return false;
     CloseHandle(event);
     return true;
+}
+void print_agent_status() {
+    const bool native=agent_running(),official=options_running();
+    const auto mapping=OpenFileMappingW(FILE_MAP_READ,FALSE,health_name);
+    const auto view=mapping?static_cast<AgentHealth*>(MapViewOfFile(mapping,FILE_MAP_READ,0,0,sizeof(AgentHealth))):nullptr;
+    if(!view){std::printf("{\"native\":%s,\"options_plus\":%s,\"ready\":false,\"health_available\":false}\n",native?"true":"false",official?"true":"false");}
+    else {
+        const auto load=[]<class T>(T& field){return std::atomic_ref<T>(field).load(std::memory_order_relaxed);};
+        const auto checked=load(view->checked),last=load(view->last_event);const auto now=GetTickCount64();
+        std::printf("{\"native\":%s,\"options_plus\":%s,\"ready\":%s,\"health_available\":true,\"pid\":%ld,\"connections\":%ld,\"reporting_repairs\":%ld,\"device_failures\":%ld,\"input_failures\":%ld,\"device_events\":%lld,\"checked_ago_ms\":%lld,\"event_ago_ms\":%lld}\n",
+            native?"true":"false",official?"true":"false",native&&load(view->ready)?"true":"false",load(view->pid),load(view->connections),load(view->repairs),load(view->failures),load(view->input_failures),load(view->events),checked?static_cast<long long>(now-checked):-1ll,last?static_cast<long long>(now-last):-1ll);
+        UnmapViewOfFile(view);
+    }
+    if(mapping)CloseHandle(mapping);
 }
 bool set_agent_thumb_speed(unsigned speed) {
     if (speed<10 || speed>200) return false;
@@ -1095,6 +1220,7 @@ int run_agent(const wchar_t* path, bool take_over) {
     if (!reload_event) {official.restore();CloseHandle(stop_event);CloseHandle(mutex);return 2;}
     SetConsoleCtrlHandler(console_event, TRUE);
     LiveThumbSpeed live_speed(mappings.thumb_speed.value_or(100));
+    LiveHealth live_health;
     int result = 0;
     std::size_t registered = 0;
     if (!register_keys(hotkeys,registered)) result=2;
@@ -1122,12 +1248,15 @@ int run_agent(const wchar_t* path, bool take_over) {
                 (wants_wheel && !divert_wheel(*mouse, wheel, mappings.thumb_speed.value_or(100)))) {
                 std::fputs("Could not activate the requested mappings.\n", stderr);
                 restore(*mouse, controls, wheel);
-                result = 2;
-                break;
+                if(health){InterlockedExchange(&health->ready,0);InterlockedIncrement(&health->failures);}
+                if(WaitForSingleObject(stop_event,2000)==WAIT_OBJECT_0)break;
+                continue;
             }
+            if(health){InterlockedIncrement(&health->connections);InterlockedExchange64(&health->checked,static_cast<LONG64>(GetTickCount64()));InterlockedExchange(&health->ready,1);}
             std::printf("Ready: %s, %zu remapped controls.\n", mouse->device.name.c_str(), controls.size());
             std::fflush(stdout);
             events(*mouse, controls, wheel, mappings,path,registered);
+            if(health)InterlockedExchange(&health->ready,0);
             restore(*mouse, controls, wheel);
         }
         if (WaitForSingleObject(stop_event, 2000) == WAIT_OBJECT_0) break;
