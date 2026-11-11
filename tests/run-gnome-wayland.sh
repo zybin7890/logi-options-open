@@ -60,7 +60,7 @@ if gsettings list-keys org.gnome.shell | grep -qx welcome-dialog-last-shown-vers
 fi
 dbus-update-activation-environment XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR \
     GSETTINGS_BACKEND XDG_CURRENT_DESKTOP XDG_SESSION_TYPE GNOME_SHELL_SESSION_MODE DISPLAY
-gnome-shell --nested --wayland --no-x11 --wayland-display=logi-test > "$evidence/gnome-shell.log" 2>&1 &
+WAYLAND_DEBUG=server gnome-shell --nested --wayland --no-x11 --wayland-display=logi-test > "$evidence/gnome-shell.log" 2>&1 &
 shell_pid=$!
 export WAYLAND_DISPLAY=logi-test QT_QPA_PLATFORM=wayland LOGI_TEST_EVIDENCE="$evidence"
 export LOGI_WAYLAND_INPUT_READY="$scratch/input-ready"
