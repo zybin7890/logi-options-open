@@ -52,7 +52,7 @@ jobs:
           if [ '${{ matrix.desktop }}' = gnome ]; then
             sudo apt-get install -y gnome-shell gjs
           else
-            sudo apt-get install -y kwin-wayland kwin-wayland-backend-virtual plasma-workspace libkf5globalaccel-bin qtwayland5
+            sudo apt-get install -y kwin-wayland kwin-wayland-backend-virtual plasma-workspace klipper libkf5globalaccel-bin qtwayland5
           fi
           python3 -m pip install 'cmake>=4.1,<4.2'
       - name: Build

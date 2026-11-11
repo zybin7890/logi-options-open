@@ -16,6 +16,9 @@ export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE KDE_FULL_SESSION=true QT
 export WAYLAND_DISPLAY=loo-kde-wayland LIBGL_ALWAYS_SOFTWARE=1 KWIN_COMPOSE=Q
 export LOGI_WAYLAND_INPUT_READY="$session/input-ready"
 unset DISPLAY
+# Session services activated by KWin must connect to this isolated compositor,
+# not inherit the outer CI display captured when dbus-run-session started.
+dbus-update-activation-environment XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_SESSION_TYPE XDG_CURRENT_DESKTOP KDE_FULL_SESSION QT_QPA_PLATFORM WAYLAND_DISPLAY
 pids=()
 provider_pid=""
 cleanup() {
@@ -46,6 +49,15 @@ kwin_wayland --virtual --no-lockscreen --socket "$WAYLAND_DISPLAY" --width 1280 
 pids+=("$!")
 for ((i=0; i<200; ++i)); do [[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]] && break; kill -0 "${pids[0]}"; sleep 0.05; done
 [[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]] || { cat "$evidence/kde-kwin.log"; exit 1; }
+
+# Exercise the default Plasma clipboard-manager path as well as bare KWin.
+klipper >"$evidence/kde-klipper.log" 2>&1 &
+pids+=("$!")
+for ((i=0; i<200; ++i)); do
+    if dbus-send --session --type=method_call --print-reply --dest=org.kde.klipper /klipper org.freedesktop.DBus.Introspectable.Introspect >"$evidence/kde-klipper-interface.log" 2>&1; then break; fi
+    kill -0 "${pids[-1]}"; sleep 0.05
+done
+dbus-send --session --type=method_call --print-reply --dest=org.kde.klipper /klipper org.freedesktop.DBus.Introspectable.Introspect >"$evidence/kde-klipper-interface.log"
 
 # Only in this explicitly opted-in CI session, give the runner access to the
 # exact virtual input devices made by the test; never alter a physical keyboard.

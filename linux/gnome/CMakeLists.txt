@@ -17,8 +17,10 @@ if(NOT mutter_girdir)
     pkg_get_variable(mutter_libdir libmutter-14 libdir)
     set(mutter_girdir "${mutter_libdir}/mutter-14")
 endif()
+list(JOIN MUTTER_LIBRARY_DIRS ":" mutter_library_path)
 add_custom_command(OUTPUT "${gir}"
     COMMAND ${CMAKE_COMMAND} -E env "CC=${CMAKE_C_COMPILER}"
+        "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:logi-clipboard>:${mutter_library_path}:$ENV{LD_LIBRARY_PATH}"
         ${G_IR_SCANNER} --warn-all --namespace=LogiClipboard --nsversion=1.0
         --identifier-prefix=LogiClipboard --symbol-prefix=logi_clipboard
         --include=GObject-2.0 --include=Gio-2.0 --include=Meta-14
