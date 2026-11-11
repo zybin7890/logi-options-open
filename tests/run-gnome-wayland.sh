@@ -100,6 +100,7 @@ kill -0 "$transport_pid" # A crashed transport must not count as success.
 gui_test="$(dirname -- "$executable")/logi-linux-gui-tests"
 if [[ -x "$gui_test" ]]; then
     LOGI_TEST_REQUIRE_NATIVE_WAYLAND=1 "$gui_test" > >(tee "$evidence/gnome-gui-test.log") 2>&1
+    LOGI_TEST_REQUIRE_NATIVE_WAYLAND=1 "$gui_test" --standalone-ring > >(tee "$evidence/gnome-standalone-ring-test.log") 2>&1
 else
     echo "Required native GUI interaction executable not found: $gui_test" >&2
     exit 1

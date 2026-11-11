@@ -2,7 +2,7 @@
 
 **独立第三方、实验性、尚不成熟。与 Logitech / 罗技无隶属关系，未获其认可或支持。**
 
-原生鼠标设置与改键工具，面向支持 HID++ 2.0 的 Logitech 鼠标，首先适配 MX Master 3S。Windows 使用 C++26 / Win32，Linux 使用 C++26 / hidapi / uinput 与 Qt6 Widgets；界面不使用浏览器。没有账号、广告、营销或遥测。
+原生鼠标设置与改键工具，面向支持 HID++ 2.0 的 Logitech 鼠标，首先适配 MX Master 3S。Windows 和 Linux 直接编译同一份 `ui/` C++26 / Qt6 Widgets 界面与资源，不使用浏览器，也不分别维护两套页面。系统路径、快捷键与命令确认差异集中于 `ui/platform.cpp`；后台分别使用 Windows HID API 与 Linux hidapi / uinput。没有账号、广告、营销或遥测。
 
 > 功能不完整，错误可能导致自定义按键、滚轮或手势暂时失效。免责声明只需首次确认一次，GUI 与 CLI 共用本机记录，重启和升级不重复显示；拒绝则退出，不接管设备。软件不提供担保。请保留停止后台和恢复标准输入的方法。
 
@@ -10,7 +10,7 @@
 
 | 功能 | Windows | Linux（实验性） |
 |---|---|---|
-| 原生设置界面 | Win32 | Qt6 Widgets |
+| 原生设置界面 | 共用 Qt6 Widgets 源码 | 共用 Qt6 Widgets 源码 |
 | 电量、DPI、SmartShift、滚轮参数 | 已实现；MX Master 3S + Bolt 本机验证 | 已移植；需要 Linux 实机验收 |
 | 全局按键、拇指滚轮、四向手势 | 已实现；本机验证 | hidapi + uinput 后端；需要实机验收 |
 | 应用专属配置、全局快捷键 | 已实现 | X11；原生 GNOME/KDE Wayland 支持在验证分支开发，验收前不发布 |
@@ -95,7 +95,7 @@ Linux 后台独占 HID，CLI/API 的设置与重载通过本地 IPC 等待确认
 
 ## 构建与验证
 
-Windows：MinGW-w64 GCC 支持 `-std=c++26`，CMake 4.1+，Ninja：
+Windows：MinGW-w64 GCC 支持 `-std=c++26`，CMake 4.1+，Ninja，以及同工具链的 Qt6 Widgets。发行包使用 Qt 部署工具包含界面运行库；鼠标后台不链接 Qt：
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

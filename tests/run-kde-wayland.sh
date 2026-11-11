@@ -62,16 +62,25 @@ dbus-send --session --type=method_call --print-reply --dest=org.kde.klipper /kli
 # Only in an explicitly opted-in disposable CI VM, allow keyboard-state queries
 # and access to the exact virtual input devices created by this test.
 if [[ "${LOGI_TEST_ALLOW_DEVICE_ACL:-}" == 1 ]]; then
+    [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted && "${RUNNER_OS:-}" == Linux ]] || {
+        echo 'Device ACL changes are restricted to disposable GitHub-hosted Linux runners.' >&2; exit 1;
+    }
     # GitHub's disposable VM includes an emulated keyboard. Complete modifier
     # release checks require its bitmap too; this opt-in is CI-only.
-    sudo -n chmod a+r /dev/input/event*
+    for name in /sys/class/input/event*/device/name; do
+        [[ -f "$name" ]] || continue
+        device_name="$(cat "$name")"
+        [[ "${device_name,,}" == *keyboard* ]] || continue
+        event="${name%/device/name}"; event="${event##*/}"
+        sudo -n setfacl -m "u:$(id -u):r" "/dev/input/$event"
+    done
     (
         while kill -0 "${pids[0]}" 2>/dev/null; do
             for name in /sys/class/input/event*/device/name; do
                 [[ -f "$name" ]] || continue
                 [[ "$(cat "$name")" == "Logi Options Open virtual input" ]] || continue
                 event="${name%/device/name}"; event="${event##*/}"
-                sudo -n chmod a+rw "/dev/input/$event"
+                sudo -n setfacl -m "u:$(id -u):r" "/dev/input/$event"
             done
             sleep 0.05
         done
@@ -96,3 +105,4 @@ done
 [[ "$ready" == 1 ]] || { cat "$evidence/kde-capabilities.log" "$evidence/kde-provider.log"; exit 1; }
 "$driver" 2>&1 | tee "$evidence/kde-wayland-test.log"
 LOGI_TEST_REQUIRE_NATIVE_WAYLAND=1 "$bindir/logi-linux-gui-tests" 2>&1 | tee "$evidence/kde-gui-test.log"
+LOGI_TEST_REQUIRE_NATIVE_WAYLAND=1 "$bindir/logi-linux-gui-tests" --standalone-ring 2>&1 | tee "$evidence/kde-standalone-ring-test.log"

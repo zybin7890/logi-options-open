@@ -116,6 +116,10 @@ def scan():
             except PermissionError:
                 if os.environ.get('LOGI_TEST_ALLOW_DEVICE_ACL') != '1':
                     raise
+                if (os.environ.get('GITHUB_ACTIONS') != 'true' or
+                        os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted' or
+                        os.environ.get('RUNNER_OS') != 'Linux'):
+                    raise RuntimeError('Device ACL changes require a disposable GitHub-hosted Linux runner')
                 # Only the exact-named temporary uinput device in this CI VM.
                 subprocess.run(['sudo', '-n', 'setfacl', '-m', f'u:{os.getuid()}:r', path], check=True)
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)

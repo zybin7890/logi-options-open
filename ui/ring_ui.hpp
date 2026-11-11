@@ -8,6 +8,7 @@
 class QPushButton;
 class QLabel;
 class QKeyEvent;
+class QShowEvent;
 namespace loo_ui {
 struct RingEntry { QString label, action; };
 using RingMenus = QMap<QString, QVector<RingEntry>>;
@@ -18,6 +19,8 @@ public:
     std::function<void(const QString&)> selected;
     QString error() const { return error_; }
 protected:
+    void showEvent(QShowEvent* event) override;
+    bool event(QEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     bool eventFilter(QObject* object, QEvent* event) override;
 private:

@@ -1,6 +1,7 @@
 #include "../first_run.hpp"
 #include "ring_ui.hpp"
 #include "device_canvas.hpp"
+#include "platform.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -59,18 +60,8 @@
 namespace {
 
 constexpr auto title = "Logi Options Open";
-constexpr auto fallback_config =
-    "# Linux mappings. Named application sections override the global profile on X11.\n"
-    "[global]\n0052 = MouseMiddle\n0053 = MouseBack\n0056 = MouseForward\n"
-    "00C4 = WheelMode\n00C3 = Super+Tab\n00C3.left = Ctrl+Alt+Left\n"
-    "00C3.right = Ctrl+Alt+Right\n00C3.up = Super\n00C3.down = Super+D\n"
-    "thumb.left = VolumeDown\nthumb.right = VolumeUp\nthumb.speed = 100\n";
-
 QString configPath() {
-    const auto override = qEnvironmentVariable("LOGI_OPTIONS_OPEN_CONFIG");
-    if (!override.isEmpty()) return QFileInfo(override).absoluteFilePath();
-    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
-        + QStringLiteral("/logi-options-open/mappings.ini");
+    return loo_ui::platform::configPath();
 }
 
 QString readFile(const QString& path) {
@@ -176,8 +167,7 @@ public:
         setWindowTitle(QString::fromLatin1(title));
         resize(1240, 800);
         setMinimumSize(1080, 700);
-        cli_ = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("logi-cli"));
-        if (!QFileInfo::exists(cli_)) cli_ = QStandardPaths::findExecutable(QStringLiteral("logi-cli"));
+        cli_ = loo_ui::platform::cliPath();
         auto* central = new QWidget(this);
         auto* layout = new QVBoxLayout(central);
         layout->setContentsMargins(32, 22, 24, 16);
@@ -267,11 +257,12 @@ public:
         setCentralWidget(central);
         connect(profile_, &QComboBox::currentIndexChanged, this, [this] { if (!loading_) setEditors(draft_); });
         connect(addProfile, &QPushButton::clicked, this, [this] {
-            const auto name = profileName_->text().trimmed().toLower();
-            if (name.isEmpty() || name.contains('[') || name.contains(']') || name.contains('\n') ||
-                name == QStringLiteral("hotkeys") || name == QStringLiteral("ring") || name.startsWith(QStringLiteral("ring/"))) {
+            const auto rawName = profileName_->text().trimmed().toLower();
+            if (rawName.isEmpty() || rawName.contains('[') || rawName.contains(']') || rawName.contains('\n') ||
+                rawName == QStringLiteral("hotkeys") || rawName == QStringLiteral("ring") || rawName.startsWith(QStringLiteral("ring/"))) {
                 message(QStringLiteral("Enter an application executable name or WM_CLASS."), true); return;
             }
+            const auto name=loo_ui::platform::profileName(rawName);
             int index = profile_->findData(name);
             if (index < 0) {
                 draft_ += QStringLiteral("\n[") + name + QStringLiteral("]\n");
@@ -295,6 +286,7 @@ public:
             "QSlider::handle:horizontal{background:#00c7b5;width:16px;margin:-6px 0;border-radius:8px;}"));
 
         process_ = new QProcess(this);
+        loo_ui::platform::prepareProcess(*process_);
         processTimer_.setSingleShot(true);
         processTimer_.setInterval(25000);
         connect(&processTimer_, &QTimer::timeout, this, [this] {
@@ -317,19 +309,18 @@ public:
         });
         connect(stop_, &QPushButton::clicked, this, [this] {
             submit({QStringLiteral("stop"), {QStringLiteral("stop")}, [this](bool ok, const QString&, const QString& error) {
-                message(ok ? QStringLiteral("Stop requested. The backend restores normal mouse reporting before exit.") : error, !ok);
+                message(ok ? (loo_ui::platform::stopConfirmsRestoration()?QStringLiteral("后台已停止并恢复标准输入。"):QStringLiteral("已发送停止请求，正在核对后台状态。")) : error, !ok);
                 QTimer::singleShot(700, this, [this] { refreshAgent(); });
             }});
         });
 
         auto data = readFile(config_);
         if (data.isEmpty() && !QFileInfo::exists(config_)) {
-            for (const auto& path : {QCoreApplication::applicationDirPath() + QStringLiteral("/default-linux.ini"),
-                                    QCoreApplication::applicationDirPath() + QStringLiteral("/../share/logi-options-open/default-linux.ini")}) {
+            for (const auto& path : loo_ui::platform::defaultConfigCandidates()) {
                 data = readFile(path);
                 if (!data.isEmpty()) break;
             }
-            if (data.isEmpty()) data = QString::fromLatin1(fallback_config);
+            if (data.isEmpty()) data = loo_ui::platform::fallbackConfig();
             if (runtime_) {
                 if (!QDir().mkpath(QFileInfo(config_).absolutePath()) || !writeFile(config_, data.toUtf8()))
                     message(QStringLiteral("Cannot create configuration: ") + config_, true);
@@ -428,7 +419,9 @@ private:
             auto caption=[](QString value){
                 static const QMap<QString,QString> names{{"MouseMiddle",QStringLiteral("中键")},{"MouseBack",QStringLiteral("后退")},
                     {"MouseForward",QStringLiteral("前进")},{"WheelMode",QStringLiteral("切换滚轮模式")},{"Super+Tab",QStringLiteral("任务视图")},
-                    {"VolumeDown",QStringLiteral("音量降低")},{"VolumeUp",QStringLiteral("音量升高")}};
+                    {"VolumeDown",QStringLiteral("音量降低")},{"VolumeUp",QStringLiteral("音量升高")},
+                    {"Win+Tab",QStringLiteral("任务视图")},{"Super+D",QStringLiteral("显示桌面")},{"Win+D",QStringLiteral("显示桌面")},
+                    {"Ctrl+Tab",QStringLiteral("下一个标签页")},{"Ctrl+Shift+Tab",QStringLiteral("上一个标签页")}};
                 return names.value(value,value);
             };
             buttonCanvas_->setLabels({caption(values.value("0052")),caption(values.value("00c4")),
@@ -538,7 +531,8 @@ private:
                 {"Ctrl+Alt+Right",QStringLiteral("下一个桌面")},{"VolumeDown",QStringLiteral("降低音量")},{"VolumeUp",QStringLiteral("提高音量")},
                 {"Mute",QStringLiteral("静音")},{"PlayPause",QStringLiteral("播放 / 暂停")},{"Ctrl+Tab",QStringLiteral("下一个标签页")},
                 {"Ctrl+Shift+Tab",QStringLiteral("上一个标签页")}};
-            for(const auto& action:suggestions)choice->addItem(actionNames.value(action,action),action);
+            for(const auto& action:suggestions)choice->addItem(actionNames.value(action,action),
+                action=="Ctrl+Alt+Left"?loo_ui::platform::desktopNavigation(false):action=="Ctrl+Alt+Right"?loo_ui::platform::desktopNavigation(true):loo_ui::platform::actionShortcut(action));
             bindings_.insert(pair.first.toLower(), choice);
             form->addRow(pair.second, choice);
             connect(choice, &QComboBox::currentTextChanged, this, [this, choice, key = pair.first](const QString& text) {
@@ -572,7 +566,7 @@ private:
     QString smartKey() const {
         if (trigger_->currentData().toString() != QStringLiteral("hotkey")) return trigger_->currentData().toString();
         auto key = hotkey_->keySequence().toString(QKeySequence::PortableText);
-        return key.replace(QStringLiteral("Meta"), QStringLiteral("Super"));
+        return loo_ui::platform::actionShortcut(key);
     }
 
     QWidget* smartPage() {
@@ -661,6 +655,7 @@ private:
                 value = QStringLiteral("TextHex(") + encoded + ')';
             } else if (type == QStringLiteral("Wait") || type == QStringLiteral("Open"))
                 value = type + '(' + value + ')';
+            else if(type==QStringLiteral("Shortcut"))value=loo_ui::platform::actionShortcut(value);
             result.push_back(value);
         }
         return result.isEmpty() ? QStringLiteral("None") : result.join(';');
@@ -722,10 +717,12 @@ private:
                     [this, file](bool ok, const QString& output, const QString& error) {
                         if (!ok) { message(error, true); return; }
                         const auto result = QJsonDocument::fromJson(output.toUtf8()).object();
-                        if (!result.value(QStringLiteral("accepted")).toBool()) {
+                        const auto outcome=loo_ui::platform::playbackResult(ok,result);
+                        if (outcome==loo_ui::platform::PlaybackResult::Failed) {
                             message(QStringLiteral("The backend did not confirm accepting this action sequence."), true); return;
                         }
-                        if (result.value(QStringLiteral("completed")).toBool()) message(QStringLiteral("Action sequence completed."));
+                        if(outcome==loo_ui::platform::PlaybackResult::Attempted)message(QStringLiteral("已尝试执行动作；目标窗口是否收到输入尚未确认。"));
+                        else if (outcome==loo_ui::platform::PlaybackResult::Completed) message(QStringLiteral("Action sequence completed."));
                         else message(QStringLiteral("Action #%1 queued. Execution has not been confirmed; check backend action status.")
                             .arg(result.value(QStringLiteral("action_id")).toInt()));
                     }});
@@ -742,8 +739,8 @@ private:
         auto* defaults = new QPushButton(QStringLiteral("Create default ring"), page); defaults->setObjectName(QStringLiteral("defaultRing")); layout->addWidget(defaults);
         connect(defaults, &QPushButton::clicked, this, [this] {
             if (!loo_ui::readRing(draft_).isEmpty()) { message(QStringLiteral("A ring already exists; its items were kept.")); return; }
-            draft_ += QStringLiteral("\n[ring]\nPlay / Pause = PlayPause\nMedia = Folder(Media)\nMute = Mute\nShow Desktop = Super+D\n"
-                "\n[ring/Media]\nPrevious Track = PreviousTrack\nNext Track = NextTrack\n");
+            draft_ += QStringLiteral("\n[ring]\nPlay / Pause = PlayPause\nMedia = Folder(Media)\nMute = Mute\nShow Desktop = ")+
+                loo_ui::platform::actionShortcut(QStringLiteral("Super+D"))+QStringLiteral("\n[ring/Media]\nPrevious Track = PreviousTrack\nNext Track = NextTrack\n");
             setEditors(draft_); scheduleSave();
         });
         connect(preview, &QPushButton::clicked, this, [this] {
@@ -876,7 +873,7 @@ private:
 
     void updateThumbInvert() {
         auto* check = checks_.value(QStringLiteral("thumb-invert"));
-        check->setEnabled(thumbInvertSupported_);
+        check->setEnabled(thumbInvertSupported_ && loo_ui::platform::canSetThumbInvert(backendRunning_));
     }
 
     void scheduleSave() {
@@ -910,18 +907,19 @@ private:
                 }
                 submit({QStringLiteral("reload"), {QStringLiteral("reload"), config_},
                     [this](bool ok, const QString& output, const QString& error) {
-                        const bool notified = QJsonDocument::fromJson(output.toUtf8()).object().value(QStringLiteral("reloaded")).toBool();
-                        message(ok ? (notified ? QStringLiteral("Saved and applied by the running backend.")
-                                               : QStringLiteral("Saved. Start the backend to apply mappings."))
-                                   : QStringLiteral("Saved, but reload failed: ") + error, !ok);
+                        const auto outcome=loo_ui::platform::reloadResult(ok,QJsonDocument::fromJson(output.toUtf8()).object());
+                        message(outcome==loo_ui::platform::ReloadResult::Applied?QStringLiteral("已保存，后台已确认应用。"):
+                            outcome==loo_ui::platform::ReloadResult::Notified?QStringLiteral("已保存并通知后台重载，尚未收到应用确认。"):
+                            QStringLiteral("已保存，但重载失败：")+error,outcome==loo_ui::platform::ReloadResult::Rejected);
                     }});
             }});
     }
 
     void startBackend() {
         QProcess daemon;
+        loo_ui::platform::prepareProcess(daemon);
         daemon.setProgram(cli_);
-        daemon.setArguments({QStringLiteral("run"), config_});
+        daemon.setArguments(loo_ui::platform::startArguments(config_));
         daemon.setWorkingDirectory(QFileInfo(config_).absolutePath());
         daemon.setStandardInputFile(QProcess::nullDevice());
         daemon.setStandardOutputFile(QFileInfo(config_).absolutePath() + QStringLiteral("/agent.log"), QIODevice::Append);
@@ -988,7 +986,7 @@ int interactionTests() {
     QTemporaryDir directory;
     if (!directory.isValid()) return 10;
     const auto path = directory.filePath(QStringLiteral("mappings.ini"));
-    const auto initial = QString::fromLatin1(fallback_config) + QStringLiteral(
+    const auto initial = loo_ui::platform::fallbackConfig() + QStringLiteral(
         "\n[ring]\nMedia = Folder(Media)\nMute = Mute\n[ring/Media]\nNext = NextTrack\nPrevious = PreviousTrack\n");
     if (!writeFile(path, initial.toUtf8())) return 11;
     Window window(path, true, false); // Real asynchronous validator, no HID queries or backend start.
@@ -1013,6 +1011,7 @@ int interactionTests() {
     const auto evidence = qEnvironmentVariable("LOGI_TEST_EVIDENCE");
     auto screenshot = [&](QWidget& widget, const QString& name) {
         if (evidence.isEmpty()) return true;
+        QApplication::processEvents();if(widget.layout())widget.layout()->activate();QApplication::processEvents();
         return QDir().mkpath(evidence) && widget.grab().save(QDir(evidence).filePath(name));
     };
     if (!screenshot(window, QStringLiteral("linux-home.png"))) return 26;
@@ -1028,13 +1027,14 @@ int interactionTests() {
     auto* profileName = window.findChild<QLineEdit*>(QStringLiteral("profileName"));
     QTest::mouseClick(profileName, Qt::LeftButton); QTest::keyClicks(profileName, "firefox");
     QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("addProfile")), Qt::LeftButton);
-    if (!await([&] { return readFile(path).contains(QStringLiteral("[firefox]")); })) return 13;
+    const auto testProfile=loo_ui::platform::profileName(QStringLiteral("firefox"));
+    if (!await([&] { return readFile(path).contains('['+testProfile+']'); })) return 13;
     QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("nav1")),Qt::LeftButton);
     QTest::mouseClick(tabs->widget(1)->findChild<QPushButton*>(QStringLiteral("hotspot_4")),Qt::LeftButton);
     auto* mapping = window.findChild<QComboBox*>(QStringLiteral("binding_0053"));
     QTest::mouseClick(mapping->lineEdit(), Qt::LeftButton);
     QTest::keyClick(mapping->lineEdit(), Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(mapping->lineEdit(), "Ctrl+Tab");
-    if (!await([&] { return globalBindings(readFile(path), QStringLiteral("firefox")).value(QStringLiteral("0053")) == QStringLiteral("Ctrl+Tab"); })) return 14;
+    if (!await([&] { return globalBindings(readFile(path), testProfile).value(QStringLiteral("0053")) == QStringLiteral("Ctrl+Tab"); })) return 14;
     if (globalBindings(readFile(path)).value(QStringLiteral("0053")) != QStringLiteral("MouseBack")) return 15;
     if (!screenshot(window,QStringLiteral("linux-button-sidebar.png")))return 30;
     QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("closeButtonDrawer")),Qt::LeftButton);
@@ -1046,7 +1046,7 @@ int interactionTests() {
     auto* steps = window.findChild<QTableWidget*>(QStringLiteral("smartSteps"));
     auto* value = static_cast<QLineEdit*>(steps->cellWidget(steps->rowCount()-1, 1));
     QTest::mouseClick(value, Qt::LeftButton); QTest::keyClick(value, Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(value, "240");
-    if (!await([&] { return globalBindings(readFile(path), QStringLiteral("firefox")).value(QStringLiteral("0052")).endsWith(QStringLiteral("Wait(240)")); })) return 16;
+    if (!await([&] { return globalBindings(readFile(path), testProfile).value(QStringLiteral("0052")).endsWith(QStringLiteral("Wait(240)")); })) return 16;
     if (!screenshot(window, QStringLiteral("linux-smart-actions.png"))) return 27;
     const auto valid = readFile(path);
     QTest::keyClick(value, Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(value, "not-a-number");
@@ -1056,8 +1056,11 @@ int interactionTests() {
     QTest::keyClick(value, Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(value, "300");
     if (!await([&] { return readFile(path).contains(QStringLiteral("Wait(300)")); })) return 19;
     QString selected;
-    loo_ui::RingDialog ring(loo_ui::readRing(initial)); ring.selected = [&](const QString& action) { selected = action; };
-    ring.show();ring.activateWindow(); if (!QTest::qWaitForWindowExposed(&ring)||!QTest::qWaitForWindowActive(&ring)) return 20;
+    auto ownsFocus=[](QWidget& widget){auto* focus=QApplication::focusWidget();return widget.isActiveWindow()&&focus&&(focus==&widget||widget.isAncestorOf(focus));};
+    loo_ui::RingDialog ring(loo_ui::readRing(initial),&window); ring.selected = [&](const QString& action) { selected = action; };
+    ring.show();if (!QTest::qWaitForWindowExposed(&ring)||!await([&]{return ownsFocus(ring);})) {
+        qCritical()<<"Ring failed to acquire real focus"<<QApplication::activeWindow()<<QApplication::focusWidget();return 20;
+    }
     QTest::mouseClick(ring.findChild<QPushButton*>(QStringLiteral("ringItem0")), Qt::LeftButton);
     QTest::qWait(10);
     if (ring.findChild<QPushButton*>(QStringLiteral("ringBack"))->text() != QStringLiteral("Back")) return 21;
@@ -1069,13 +1072,27 @@ int interactionTests() {
     QTest::keyClick(QApplication::focusWidget(), Qt::Key_Right);
     QTest::keyClick(QApplication::focusWidget(), Qt::Key_Return);
     if (selected != QStringLiteral("PreviousTrack") || ring.isVisible()) return 23;
-    loo_ui::RingDialog cancel(loo_ui::readRing(initial)); cancel.show();cancel.activateWindow();
-    if (!QTest::qWaitForWindowExposed(&cancel)||!QTest::qWaitForWindowActive(&cancel)) return 24;
+    loo_ui::RingDialog cancel(loo_ui::readRing(initial),&window); cancel.show();
+    if (!QTest::qWaitForWindowExposed(&cancel)||!await([&]{return ownsFocus(cancel);})) return 24;
     QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
     if (cancel.isVisible()) return 25;
     window.close();
     qInfo("Qt interaction tests passed: profile isolation, edits, durable save, rejected invalid config, ring mouse/keyboard/navigation/cancel.");
     return 0;
+}
+int standaloneRingTest() {
+    if(qEnvironmentVariableIsSet("LOGI_TEST_REQUIRE_NATIVE_WAYLAND")&&!QGuiApplication::platformName().startsWith("wayland"))return 43;
+    QString selected;
+    loo_ui::RingDialog ring(loo_ui::readRing(QStringLiteral("[ring]\nMute = Mute\n")));
+    ring.selected=[&](const QString& action){selected=action;};ring.show();
+    if(!QTest::qWaitForWindowExposed(&ring))return 40;
+    QElapsedTimer wait;wait.start();
+    auto ownsFocus=[&]{auto* focus=QApplication::focusWidget();return ring.isActiveWindow()&&focus&&(focus==&ring||ring.isAncestorOf(focus));};
+    while(!ownsFocus()&&wait.elapsed()<10000)QTest::qWait(20);
+    if(!ownsFocus()){qCritical()<<"Standalone ring lacks actual keyboard focus"<<QApplication::activeWindow()<<QApplication::focusWidget();return 41;}
+    QTest::keyClick(QApplication::focusWidget(),Qt::Key_1);
+    if(selected!=QStringLiteral("Mute")||ring.isVisible())return 42;
+    qInfo("Standalone Ring acquired real window/keyboard focus and completed selection.");return 0;
 }
 #endif
 
@@ -1086,7 +1103,8 @@ int main(int argc, char** argv) {
     QCoreApplication::setApplicationName(QStringLiteral("logi-options-open"));
     QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0-alpha.2"));
 #ifdef LOGI_GUI_TEST
-    const int result = interactionTests();
+    qputenv("LOGI_GUI_TRACE","1");
+    const int result = application.arguments().contains(QStringLiteral("--standalone-ring"))?standaloneRingTest():interactionTests();
     if (result) qCritical("Qt interaction test failed at checkpoint %d", result);
     return result;
 #endif
@@ -1123,9 +1141,8 @@ int main(int argc, char** argv) {
             const auto content = (QStringLiteral("[hotkeys]\nCtrl+Alt+F10 = ") + action + '\n').toUtf8();
             if (file->write(content) != content.size() || !file->flush()) { application.exit(1); return; }
             const auto path = file->fileName(); file->close();
-            auto* command = new QProcess(&application);
-            auto cli = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("logi-cli"));
-            if (!QFileInfo::exists(cli)) cli = QStandardPaths::findExecutable(QStringLiteral("logi-cli"));
+            auto* command = new QProcess(&application);loo_ui::platform::prepareProcess(*command);
+            auto cli = loo_ui::platform::cliPath();
             command->setProgram(cli); command->setArguments({QStringLiteral("play-actions"), path});
             QObject::connect(command, &QProcess::finished, &application, [&, command, file](int code, QProcess::ExitStatus status) {
                 if (status != QProcess::NormalExit || code != 0) {
@@ -1133,10 +1150,12 @@ int main(int argc, char** argv) {
                     application.exit(status == QProcess::NormalExit ? code : 1); return;
                 }
                 const auto result = QJsonDocument::fromJson(command->readAllStandardOutput()).object();
-                if (!result.value(QStringLiteral("accepted")).toBool()) {
+                const auto outcome=loo_ui::platform::playbackResult(true,result);
+                if (outcome==loo_ui::platform::PlaybackResult::Failed) {
                     qCritical("The backend did not confirm accepting the selected ring action."); application.exit(1); return;
                 }
-                if (result.value(QStringLiteral("completed")).toBool()) qInfo("Ring action completed.");
+                if(outcome==loo_ui::platform::PlaybackResult::Attempted)qInfo("Ring action attempted; target delivery is unconfirmed.");
+                else if (outcome==loo_ui::platform::PlaybackResult::Completed) qInfo("Ring action completed.");
                 else qInfo("Ring action #%d queued; execution has not been confirmed.", result.value(QStringLiteral("action_id")).toInt());
                 application.exit(0);
             });

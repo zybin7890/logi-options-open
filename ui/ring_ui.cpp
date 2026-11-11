@@ -1,10 +1,13 @@
 #include "ring_ui.hpp"
+#include <QApplication>
+#include <QDebug>
 #include <QCursor>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPushButton>
 #include <QScreen>
+#include <QShowEvent>
 #include <cmath>
 
 namespace loo_ui {
@@ -29,6 +32,11 @@ RingDialog::RingDialog(RingMenus menus, QWidget* parent, const QString& folder) 
     setObjectName(QStringLiteral("actionsRing"));
     setWindowTitle(QStringLiteral("Actions Ring"));
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    // A preview belongs to its editor window. Giving the compositor a real
+    // modal/transient relationship is what permits keyboard focus on Wayland;
+    // an always-on-top hint alone does not activate a modeless window.
+    setWindowModality(parent ? Qt::WindowModal : Qt::ApplicationModal);
+    setFocusPolicy(Qt::StrongFocus);
     setFixedSize(600, 600);
     setStyleSheet(QStringLiteral("QDialog{background:#191d1d;border:1px solid #52635f;border-radius:24px;}"
         "QLabel{color:#dce7e3;font-size:14px;}QPushButton{background:#303b38;color:white;border:2px solid #52635f;"
@@ -39,6 +47,7 @@ RingDialog::RingDialog(RingMenus menus, QWidget* parent, const QString& folder) 
     heading_->setAlignment(Qt::AlignCenter);
     center_ = new QPushButton(QStringLiteral("Close"), this);
     center_->setObjectName(QStringLiteral("ringBack"));
+    center_->setAutoDefault(false);center_->setFocusPolicy(Qt::StrongFocus);
     center_->setGeometry(242, 270, 116, 60);
     connect(center_, &QPushButton::clicked, this, [this] { back(); });
     center_->installEventFilter(this);
@@ -79,6 +88,7 @@ void RingDialog::render() {
         const double angle = -1.5707963267948966 + i * 6.283185307179586 / entries.size();
         auto* button = new QPushButton(QString::number(i+1) + QStringLiteral("  ") + entries[i].label, this);
         button->setObjectName(QStringLiteral("ringItem%1").arg(i));
+        button->setAutoDefault(false);button->setFocusPolicy(Qt::StrongFocus);
         button->setGeometry(qRound(300 + 204 * std::cos(angle) - 74), qRound(300 + 204 * std::sin(angle) - 34), 148, 68);
         connect(button, &QPushButton::clicked, this, [this, i] { choose(i); });
         button->installEventFilter(this);
@@ -112,7 +122,27 @@ void RingDialog::choose(int index) {
 }
 
 void RingDialog::back() { if (stack_.size() > 1) { stack_.removeLast(); render(); } else reject(); }
+void RingDialog::showEvent(QShowEvent* event) {
+    QDialog::showEvent(event);
+    if(choices_.isEmpty())center_->setFocus(Qt::OtherFocusReason);
+    else choices_[current_]->setFocus(Qt::OtherFocusReason);
+}
+bool RingDialog::event(QEvent* event) {
+    const bool result=QDialog::event(event);
+    if(qEnvironmentVariableIsSet("LOGI_GUI_TRACE") &&
+       (event->type()==QEvent::WindowActivate || event->type()==QEvent::WindowDeactivate || event->type()==QEvent::Show)) {
+        const auto* focus=QApplication::focusWidget();
+        qInfo()<<"Ring window event"<<event->type()<<"active"<<isActiveWindow()
+               <<"focus"<<(focus?focus->objectName():QStringLiteral("<none>"))
+               <<"ownsFocus"<<(focus && (focus==this || isAncestorOf(focus)))
+               <<"hasParent"<<(parentWidget()!=nullptr)<<"modality"<<windowModality();
+    }
+    return result;
+}
 bool RingDialog::eventFilter(QObject* object, QEvent* event) {
+    if(qEnvironmentVariableIsSet("LOGI_GUI_TRACE") &&
+       (event->type()==QEvent::FocusIn || event->type()==QEvent::FocusOut || event->type()==QEvent::KeyPress))
+        qInfo()<<"Ring child event"<<object->objectName()<<event->type();
     if (event->type() == QEvent::KeyPress) {
         auto* key = static_cast<QKeyEvent*>(event);
         if ((key->key() >= Qt::Key_1 && key->key() <= Qt::Key_8) || key->key() == Qt::Key_Escape ||
