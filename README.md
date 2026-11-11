@@ -38,6 +38,8 @@ Windows 设备验证来自本项目开发过程；不意味着所有 Logitech �
 
 ## Linux
 
+发行包为 Ubuntu 24.04 x86_64 构建，动态依赖系统 Qt6、hidapi 和 C++ 运行库，并非跨发行版通用的静态包。解压后运行 `bin/logi-options-open`；先按 [Linux 说明](linux/README.md) 配置设备访问权限。其他发行版建议从源码构建。
+
 依赖：支持 C++26 的编译器、CMake 3.30+（建议 4.1）、Ninja、hidapi-hidraw 开发包；界面需要 Qt6 Widgets。Ubuntu 24.04 示例：
 
 ```sh

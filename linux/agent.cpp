@@ -67,7 +67,10 @@ struct Input {
     Input() {
         if(fd.value<0)throw std::runtime_error("Cannot open /dev/uinput; install the opt-in permissions rule and log in again");
         capability(UI_SET_EVBIT,EV_KEY);capability(UI_SET_EVBIT,EV_REL);
-        for(int key=1;key<=KEY_MAX;++key)capability(UI_SET_KEYBIT,key);
+        // Only keyboard/media keys and mouse buttons: advertising every BTN_*
+        // code also advertises a joystick/tablet and confuses device classifiers.
+        for(int key=KEY_ESC;key<=KEY_F24;++key)capability(UI_SET_KEYBIT,key);
+        for(int button:{BTN_LEFT,BTN_RIGHT,BTN_MIDDLE,BTN_SIDE,BTN_EXTRA})capability(UI_SET_KEYBIT,button);
         capability(UI_SET_RELBIT,REL_WHEEL);capability(UI_SET_RELBIT,REL_HWHEEL);
         capability(UI_SET_RELBIT,REL_X);capability(UI_SET_RELBIT,REL_Y);
         uinput_setup setup{};setup.id.bustype=BUS_VIRTUAL;setup.id.vendor=0x1209;setup.id.product=0x0001;

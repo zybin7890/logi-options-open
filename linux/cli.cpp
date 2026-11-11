@@ -17,7 +17,7 @@ std::wstring wide(std::string_view value){return {value.begin(),value.end()};}
 void status(logi::Mouse& mouse) {
     std::cout<<"{\"device\":"<<json(mouse.device.name)<<",\"platform\":\"linux\",\"battery\":";
     auto battery=mouse.request(mouse.battery,mouse.unified_battery?1:0);
-    if(battery)std::cout<<unsigned(battery.packet.data()[0]);else std::cout<<"null";
+    if(battery && battery.packet.data()[0]<=100)std::cout<<unsigned(battery.packet.data()[0]);else std::cout<<"null";
     std::cout<<",\"dpi_choices\":[";
     bool first=true;for(auto dpi:mouse.dpi_choices){if(!first)std::cout<<',';first=false;std::cout<<dpi;}
     std::cout<<"],\"settings\":{";first=true;
