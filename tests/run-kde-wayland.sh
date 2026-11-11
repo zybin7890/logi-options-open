@@ -39,13 +39,13 @@ Type=Application
 Name=Logi Options Open isolated input test
 Exec=$bindir/logi-kde-input-forwarder
 NoDisplay=true
-X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input;
+X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input
 EOF
 kbuildsycoca5 --noincremental >"$evidence/kde-desktop-database.log" 2>&1
 
 # Virtual KWin has no physical/logind seat. It is a real Wayland compositor;
 # the test-only forwarder transports actual uinput/evdev events to fake-input.
-kwin_wayland --virtual --no-lockscreen --socket "$WAYLAND_DISPLAY" --width 1280 --height 900 >"$evidence/kde-kwin.log" 2>&1 &
+QT_LOGGING_RULES='kwin_core.debug=true;KWIN_UTILS.debug=true' kwin_wayland --virtual --no-lockscreen --socket "$WAYLAND_DISPLAY" --width 1280 --height 900 >"$evidence/kde-kwin.log" 2>&1 &
 pids+=("$!")
 for ((i=0; i<200; ++i)); do [[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]] && break; kill -0 "${pids[0]}"; sleep 0.05; done
 [[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]] || { cat "$evidence/kde-kwin.log"; exit 1; }

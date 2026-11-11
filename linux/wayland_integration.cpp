@@ -51,9 +51,10 @@ int receiver(QApplication& app,const QString& id,const QString& status) {
     QGuiApplication::setDesktopFileName(id);
     Editor editor;editor.setWindowTitle(id);editor.resize(720,440);editor.show();editor.setFocus();
     QTimer timer;QObject::connect(&timer,&QTimer::timeout,[&]{
+        const auto* clipboard = QApplication::clipboard()->mimeData();
         write_json(status,{{"platform",QGuiApplication::platformName()},{"id",id},
             {"active",editor.isActiveWindow()},{"focus",editor.hasFocus()},
-            {"key_events",editor.key_events},{"clipboard_formats",QJsonArray::fromStringList(QApplication::clipboard()->mimeData()->formats())},
+            {"key_events",editor.key_events},{"clipboard_formats",QJsonArray::fromStringList(clipboard ? clipboard->formats() : QStringList{})},
             {"presses",editor.presses},{"releases",int(editor.releases)},
             {"pastes",editor.pastes},{"text",editor.toPlainText()}});
         if(qEnvironmentVariableIsSet("LOGI_TEST_EVIDENCE"))
