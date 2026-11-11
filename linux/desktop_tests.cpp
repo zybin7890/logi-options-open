@@ -85,15 +85,24 @@ struct Receiver {
         return true;
     }
 };
-template<class F>void until(Desktop& desktop,Receiver& receiver,F condition,std::vector<std::vector<Action>>& fired) {
+template<class F>void until(const char* checkpoint,Desktop& desktop,Receiver& receiver,F condition,std::vector<std::vector<Action>>& fired) {
+    std::cout<<"Waiting for "<<checkpoint<<std::endl;
     const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
     do {
         receiver.pump();auto actions=desktop.poll_hotkeys();
         for(auto& action:actions)fired.push_back(std::move(action));
-        receiver.pump();if(condition())return;
+        receiver.pump();if(condition()){std::cout<<"Passed "<<checkpoint<<std::endl;return;}
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }while(std::chrono::steady_clock::now()<end);
-    throw std::runtime_error("Timed out waiting for actual X11 events");
+    Window focused{};int revert{};XGetInputFocus(receiver.display,&focused,&revert);
+    std::cerr<<"Checkpoint "<<checkpoint<<": focus-window="<<focused<<", expected-clients="<<receiver.first<<','<<receiver.second
+             <<", focus-events="<<receiver.focus<<", presses="<<receiver.press<<", releases="<<receiver.release
+             <<", hotkeys="<<fired.size()<<", pasted="<<receiver.pasted.size()<<", text-busy="<<desktop.busy()<<", modifiers-up="<<receiver.modifiers_up()<<"\nidentities:";
+    for(const auto& id:desktop.foreground())std::cerr<<' '<<id;
+    std::cerr<<"\nreceived symbols:";
+    for(auto symbol:receiver.symbols)std::cerr<<' '<<(XKeysymToString(symbol)?XKeysymToString(symbol):"<unknown>");
+    std::cerr<<'\n';
+    throw std::runtime_error(std::string("Timed out waiting for actual X11 events: ")+checkpoint);
 }
 }
 int main() {
@@ -103,16 +112,16 @@ int main() {
         auto config=parse("[global]\n0053=Ctrl+A\n0056=Ctrl+C\n[loo-editor]\n0053=Ctrl+E\n[loobrowser]\n0053=Ctrl+B\n[hotkeys]\nCtrl+Alt+F10=Text(Triggered)\n");
         desktop.configure_hotkeys(config);
         receiver.activate(receiver.first);
-        until(desktop,receiver,[&]{const auto ids=desktop.foreground();return std::ranges::find(ids,"loo-editor")!=ids.end();},fired);
+        until("editor foreground",desktop,receiver,[&]{const auto ids=desktop.foreground();return std::ranges::find(ids,"loo-editor")!=ids.end();},fired);
         auto identity=desktop.foreground();
         require(!identity.empty() && identity.front()==normalized(std::filesystem::read_symlink("/proc/self/exe").filename().string()),"PID executable identity priority");
         desktop.inject_chord(lookup(config,{0x53,Direction::tap},identity)->front().keys);
-        until(desktop,receiver,[&]{return std::ranges::find(receiver.symbols,XK_e)!=receiver.symbols.end();},fired);
+        until("editor Ctrl+E input",desktop,receiver,[&]{return std::ranges::find(receiver.symbols,XK_e)!=receiver.symbols.end();},fired);
         receiver.activate(receiver.second);
-        until(desktop,receiver,[&]{const auto ids=desktop.foreground();return std::ranges::find(ids,"loobrowser")!=ids.end();},fired);
+        until("browser foreground",desktop,receiver,[&]{const auto ids=desktop.foreground();return std::ranges::find(ids,"loobrowser")!=ids.end();},fired);
         desktop.inject_chord(lookup(config,{0x53,Direction::tap},desktop.foreground())->front().keys);
         desktop.inject_chord(lookup(config,{0x56,Direction::tap},desktop.foreground())->front().keys);
-        until(desktop,receiver,[&]{return std::ranges::find(receiver.symbols,XK_b)!=receiver.symbols.end() && std::ranges::find(receiver.symbols,XK_c)!=receiver.symbols.end();},fired);
+        until("browser Ctrl+B and inherited Ctrl+C input",desktop,receiver,[&]{return std::ranges::find(receiver.symbols,XK_b)!=receiver.symbols.end() && std::ranges::find(receiver.symbols,XK_c)!=receiver.symbols.end();},fired);
 
         // Hold trigger modifiers after releasing the main key: no action fires
         // until the user's modifiers are up. Also exercise modifier-first release.
@@ -120,11 +129,11 @@ int main() {
         desktop.poll_hotkeys();receiver.key(XK_F10,false);
         require(desktop.poll_hotkeys().empty(),"Hotkey fired with held modifiers");
         receiver.key(XK_Alt_L,false);receiver.key(XK_Control_L,false);
-        until(desktop,receiver,[&]{return fired.size()==1;},fired);
+        until("global trigger normal release",desktop,receiver,[&]{return fired.size()==1;},fired);
         require(fired[0][0].text=="Triggered","Wrong hotkey action");
         receiver.key(XK_Control_L,true);receiver.key(XK_Alt_L,true);receiver.key(XK_F10,true);
         desktop.poll_hotkeys();receiver.key(XK_Control_L,false);receiver.key(XK_Alt_L,false);receiver.key(XK_F10,false);
-        until(desktop,receiver,[&]{return fired.size()==2;},fired);
+        until("global trigger modifiers-first release",desktop,receiver,[&]{return fired.size()==2;},fired);
         require(receiver.modifiers_up(),"Hotkey left modifier down");
 
         // A different client owns F9. Failed replacement must retain F10.
@@ -134,21 +143,21 @@ int main() {
         auto conflict=parse("[hotkeys]\nCtrl+Alt+F9=Text(Conflict)\n");
         rejects([&]{desktop.configure_hotkeys(conflict);});
         desktop.inject_chord({KEY_LEFTCTRL,KEY_LEFTALT,KEY_F10});
-        until(desktop,receiver,[&]{return fired.size()==3;},fired);
+        until("old trigger after conflicting reload",desktop,receiver,[&]{return fired.size()==3;},fired);
         XUngrabKey(receiver.display,f9,ControlMask|Mod1Mask,DefaultRootWindow(receiver.display));XSync(receiver.display,False);
 
         // The same chord emitted by an action must reach the focused client,
         // without recursively activating our global trigger.
         desktop.suspend_hotkeys(true);desktop.inject_chord({KEY_LEFTCTRL,KEY_LEFTALT,KEY_F10});
-        until(desktop,receiver,[&]{return std::ranges::find(receiver.symbols,XK_F10)!=receiver.symbols.end();},fired);
+        until("suspended shortcut reaches client",desktop,receiver,[&]{return std::ranges::find(receiver.symbols,XK_F10)!=receiver.symbols.end();},fired);
         desktop.suspend_hotkeys(false);require(fired.size()==3,"Synthetic action recursively fired a trigger");
 
         const std::string text="Hello; (X11) \xe4\xbd\xa0\xe5\xa5\xbd\nsecond line";
         desktop.type_text(text);
-        until(desktop,receiver,[&]{return !desktop.busy() && !receiver.pasted.empty();},fired);
+        until("Unicode paste received",desktop,receiver,[&]{return !desktop.busy() && !receiver.pasted.empty();},fired);
         require(receiver.pasted.back()==text,"UTF-8 Text did not reach focused window");
         desktop.type_text("one");desktop.type_text("two");
-        until(desktop,receiver,[&]{return !desktop.busy() && receiver.pasted.size()==3;},fired);
+        until("ordered text queue received",desktop,receiver,[&]{return !desktop.busy() && receiver.pasted.size()==3;},fired);
         require(receiver.pasted[1]=="one" && receiver.pasted[2]=="two","Text queue reordered payloads");
         require(receiver.modifiers_up(),"Text left modifiers down");
         require(receiver.focus>=2 && receiver.release>0,"Focus/key release events not observed");

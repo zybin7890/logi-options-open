@@ -29,7 +29,7 @@ int main(){
     if(!root)return 1;setenv("XDG_RUNTIME_DIR",root,1);
     const auto config=std::filesystem::path(root)/"mappings.ini";
     const auto trace=config.string()+".trace",events=config.string()+".events",focus=config.string()+".focus";
-    const std::string original="[global]\n0052=MouseMiddle\n0053=MouseBack\nthumb.left=VolumeDown\nthumb.right=VolumeUp\n[editor]\n0052=MouseForward\n";
+    const std::string original="[global]\n0052=MouseMiddle\n0053=MouseBack\nthumb.left=VolumeDown\nthumb.right=VolumeUp\n[editor]\n0052=MouseForward\n[gestures]\n0052=MouseMiddle\n0052.left=Ctrl+C\n";
     try{
         write_file(config,original);Child child(config);
         until([]{return has(transact("agent-status"),"\"ready\":true");},"Daemon did not become ready");
@@ -43,6 +43,8 @@ int main(){
         fixture::append(events,"buttons 82");
         until([&]{return has(contents(trace),"key 274 1");},"Middle button down was not injected");
         require(!has(contents(trace),"key 274 0"),"Held mouse button was released prematurely");
+        fixture::append(events,"motion 1 1");fixture::append(events,"motion 20 5");
+        until([&]{return has(contents(trace),"relative 0 20")&&has(contents(trace),"relative 1 5");},"App-only gesture diversion froze normal drag motion in another app");
         write_file(focus,"editor");fixture::append(events,"buttons");
         until([&]{return has(contents(trace),"key 274 0");},"Profile switch released wrong held button");
         fixture::append(events,"buttons 82");

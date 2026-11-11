@@ -10,4 +10,4 @@ openbox >"$build/test-evidence/openbox.log" 2>&1 &
 wm_pid=$!
 trap 'kill "$wm_pid" 2>/dev/null || true' EXIT INT TERM
 # Desktop tests wait for their own mapped/active windows; no fixed startup sleep.
-ctest --test-dir "$build" -E linux-uinput-kernel --output-on-failure -V
+ctest --test-dir "$build" -E linux-uinput-kernel --output-on-failure -V --output-log "$build/test-evidence/desktop-tests.log"

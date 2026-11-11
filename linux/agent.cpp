@@ -255,7 +255,7 @@ public:
     }
 };
 struct Pending{std::vector<Action> actions;std::size_t next{};Clock::time_point due{};unsigned id{};};
-struct State{bool down{},skip_first{};int x{},y{};unsigned held_button{};std::vector<std::string> context;};
+struct State{bool down{},skip_first{},gesture_active{};int x{},y{};unsigned held_button{};std::vector<std::string> context;};
 std::vector<Action> fallback(unsigned id){
     if(id==0x52)return actions("MouseMiddle");if(id==0x53)return actions("MouseBack");if(id==0x56)return actions("MouseForward");if(id==0xc4)return actions("WheelMode");return {};
 }
@@ -413,18 +413,23 @@ int run_with(const std::filesystem::path& config_file,DeviceBackend& device,Inpu
                 for(const auto& [id,xy]:controls){
                     if(id==thumb)continue;auto& s=state[id];const bool down=std::ranges::find(event.buttons,id)!=event.buttons.end();
                     if(down&&!s.down){
-                        s={true,true,0,0,0,hooks.foreground()};auto sequence=choose({id,Direction::tap},s.context);
-                        if(auto button=held_mouse(sequence);button&&!xy){s.held_button=button;key_down(button);}
-                        else if(!xy&&!sequence.empty())queue(std::move(sequence));
+                        s={true,true,false,0,0,0,hooks.foreground()};
+                        for(auto direction:{Direction::left,Direction::right,Direction::up,Direction::down})
+                            s.gesture_active|=lookup(config,{id,direction},s.context)!=nullptr;
+                        auto sequence=choose({id,Direction::tap},s.context);
+                        if(auto button=held_mouse(sequence);button&&!s.gesture_active){s.held_button=button;key_down(button);}
+                        else if(!s.gesture_active&&!sequence.empty())queue(std::move(sequence));
                     }
                     if(!down&&s.down){
                         if(s.held_button)key_up(s.held_button);
-                        if(xy){auto sequence=choose({id,gesture(s.x,s.y,device.threshold())},s.context);if(!sequence.empty())queue(std::move(sequence));}s={};
+                        if(s.gesture_active){auto sequence=choose({id,gesture(s.x,s.y,device.threshold())},s.context);if(!sequence.empty())queue(std::move(sequence));}s={};
                     }
                 }
             }else if(event.kind==DeviceEvent::Kind::motion){
                 for(auto& [id,s]:state)if(s.down&&controls[id]){
-                    if(s.skip_first){s.skip_first=false;continue;}s.x=std::clamp(s.x+event.x,-100000,100000);s.y=std::clamp(s.y+event.y,-100000,100000);
+                    if(s.skip_first){s.skip_first=false;continue;}
+                    if(s.gesture_active){s.x=std::clamp(s.x+event.x,-100000,100000);s.y=std::clamp(s.y+event.y,-100000,100000);}
+                    else{input.relative(REL_X,event.x);input.relative(REL_Y,event.y);input.sync();}
                 }
             }
         }

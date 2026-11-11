@@ -354,7 +354,6 @@ private:
         layout->addWidget(group);
         auto* description = new QLabel(QStringLiteral("Changes apply immediately. Unsupported settings remain disabled.\n"
             "The backend requires access to your Logitech hidraw device and /dev/uinput.\n"
-            "Stop the backend before changing thumb wheel inversion.\n"
             "Stop other mouse remapping software before starting this backend."), page);
         description->setWordWrap(true);
         layout->addWidget(description);
@@ -423,6 +422,7 @@ private:
         auto* page = new QWidget;
         auto* layout = new QVBoxLayout(page);
         auto* form = new QFormLayout;
+        smartForm_ = form;
         trigger_ = new QComboBox(page); trigger_->setObjectName(QStringLiteral("smartTrigger"));
         const QList<QPair<QString, QString>> triggers{
             {QStringLiteral("Middle button"), QStringLiteral("0052")}, {QStringLiteral("Back button"), QStringLiteral("0053")},
@@ -434,6 +434,7 @@ private:
         hotkey_ = new QKeySequenceEdit(page); hotkey_->setObjectName(QStringLiteral("smartHotkey"));
         hotkey_->setKeySequence(QKeySequence(QStringLiteral("Ctrl+Alt+F10"))); hotkey_->setEnabled(false);
         form->addRow(QStringLiteral("Shortcut trigger"), hotkey_);
+        form->setRowVisible(hotkey_, false);
         layout->addLayout(form);
         steps_ = new QTableWidget(0, 2, page); steps_->setObjectName(QStringLiteral("smartSteps"));
         steps_->setHorizontalHeaderLabels({QStringLiteral("Then"), QStringLiteral("Value")});
@@ -504,6 +505,7 @@ private:
     void loadSmart() {
         const bool previous = loading_; loading_ = true;
         hotkey_->setEnabled(trigger_->currentData().toString() == QStringLiteral("hotkey"));
+        smartForm_->setRowVisible(hotkey_, hotkey_->isEnabled());
         auto entries = globalBindings(draft_, smartSection());
         auto sequence = entries.value(smartKey().toLower());
         if (sequence.isEmpty() && smartSection() != QStringLiteral("hotkeys"))
@@ -706,8 +708,7 @@ private:
 
     void updateThumbInvert() {
         auto* check = checks_.value(QStringLiteral("thumb-invert"));
-        check->setEnabled(thumbInvertSupported_ && !backendRunning_);
-        check->setToolTip(backendRunning_ ? QStringLiteral("Stop the backend before changing this device setting.") : QString{});
+        check->setEnabled(thumbInvertSupported_);
     }
 
     void scheduleSave() {
@@ -775,6 +776,7 @@ private:
     QComboBox *profile_{}, *trigger_{};
     QLineEdit* profileName_{};
     QKeySequenceEdit* hotkey_{};
+    QFormLayout* smartForm_{};
     QTableWidget* steps_{};
     QMap<QString, QCheckBox*> checks_;
     QMap<QString, QComboBox*> bindings_;
