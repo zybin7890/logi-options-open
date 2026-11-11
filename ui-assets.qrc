@@ -1,0 +1,8 @@
+<RCC><qresource prefix="/assets">
+<file alias="side.png">assets/side.png</file>
+<file alias="front.png">assets/front.png</file>
+<file alias="back.png">assets/back.png</file>
+<file alias="firefox.png">assets/firefox.png</file>
+<file alias="chrome.png">assets/chrome.png</file>
+<file alias="wps.png">assets/wps.png</file>
+</qresource></RCC>

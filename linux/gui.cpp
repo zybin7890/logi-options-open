@@ -1,5 +1,6 @@
 #include "../first_run.hpp"
 #include "ring_ui.hpp"
+#include "device_canvas.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -36,6 +37,9 @@
 #include <QTemporaryFile>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QPainter>
+#include <QVariantAnimation>
+#include <QButtonGroup>
 #ifdef LOGI_GUI_TEST
 #include <QtTest/QTest>
 #include <QElapsedTimer>
@@ -140,62 +144,114 @@ struct Task {
     std::function<void(bool, const QString&, const QString&)> done;
 };
 
+class Toggle final : public QCheckBox {
+public:
+    explicit Toggle(const QString& text,QWidget* parent=nullptr):QCheckBox(text,parent) {
+        setMinimumHeight(42);setCursor(Qt::PointingHandCursor);
+        animation_.setDuration(140);
+        connect(&animation_,&QVariantAnimation::valueChanged,this,[this](const QVariant& v){position_=v.toReal();update();});
+        connect(this,&QCheckBox::toggled,this,[this](bool checked){
+            animation_.stop();animation_.setStartValue(position_);animation_.setEndValue(checked?1.:0.);animation_.start();
+        });
+    }
+protected:
+    bool hitButton(const QPoint& p)const override{return rect().contains(p);}
+    void paintEvent(QPaintEvent*)override {
+        QPainter p(this);p.setRenderHint(QPainter::Antialiasing);
+        p.setOpacity(isEnabled()?1.:.4);p.setPen(QColor("#eeeeee"));
+        p.drawText(rect().adjusted(0,0,-60,0),Qt::AlignVCenter|Qt::AlignLeft,text());
+        const QRectF track(width()-48,(height()-24)/2.,44,24);
+        p.setPen(Qt::NoPen);p.setBrush(isChecked()?QColor("#00d8c6"):QColor("#555555"));p.drawRoundedRect(track,12,12);
+        p.setBrush(isChecked()?QColor("#101010"):QColor("#ffffff"));p.drawEllipse(QRectF(track.x()+3+position_*20,track.y()+3,18,18));
+        if(hasFocus()){p.setBrush(Qt::NoBrush);p.setPen(QPen(QColor("#00d8c6"),1));p.drawRoundedRect(track.adjusted(-3,-3,3,3),15,15);}
+    }
+private:QVariantAnimation animation_;qreal position_{};
+};
+
 class Window : public QMainWindow {
 public:
     explicit Window(QString config, bool runtime = true, bool refreshOnOpen = true)
         : config_(std::move(config)), runtime_(runtime) {
         setWindowTitle(QString::fromLatin1(title));
-        resize(960, 740);
-        setMinimumSize(680, 540);
+        resize(1240, 800);
+        setMinimumSize(1080, 700);
         cli_ = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("logi-cli"));
         if (!QFileInfo::exists(cli_)) cli_ = QStandardPaths::findExecutable(QStringLiteral("logi-cli"));
         auto* central = new QWidget(this);
         auto* layout = new QVBoxLayout(central);
-        layout->setContentsMargins(28, 22, 28, 22);
+        layout->setContentsMargins(32, 22, 24, 16);
         auto* header = new QHBoxLayout;
-        auto* heading = new QLabel(QString::fromLatin1(title), central);
+        auto* home = new QPushButton(QStringLiteral("‹"),central);home->setFixedSize(44,44);
+        home->setAccessibleName(QStringLiteral("返回首页"));header->addWidget(home);
+        auto* heading = new QLabel(QStringLiteral("MX Master 3S"), central);
         heading->setStyleSheet(QStringLiteral("font-size:26px;font-weight:600"));
         header->addWidget(heading);
         header->addStretch();
-        auto* refresh = new QPushButton(QStringLiteral("Refresh"), central);
+        auto* smart = new QPushButton(QStringLiteral("Smart Actions"),central);smart->setObjectName("navSmart");header->addWidget(smart);
+        auto* ring = new QPushButton(QStringLiteral("Actions Ring"),central);ring->setObjectName("navRing");header->addWidget(ring);
+        auto* refresh = new QPushButton(QStringLiteral("刷新"), central);
         header->addWidget(refresh);
         layout->addLayout(header);
-        device_ = new QLabel(QStringLiteral("No device read yet"), central);
-        layout->addWidget(device_);
-        auto* note = new QLabel(QStringLiteral("Third-party experimental software · Linux preview"), central);
-        note->setStyleSheet(QStringLiteral("color:#b6bebd"));
-        layout->addWidget(note);
-        auto* profiles = new QHBoxLayout;
-        profiles->addWidget(new QLabel(QStringLiteral("Application profile"), central));
+        device_ = new QLabel(QStringLiteral("设备未连接"), central);
+        profileBar_=new QHBoxLayout;profileBar_->setSpacing(8);profileBar_->addStretch();
+        layout->addLayout(profileBar_);
         profile_ = new QComboBox(central); profile_->setObjectName(QStringLiteral("profile"));
-        profile_->addItem(QStringLiteral("Global"), QStringLiteral("global"));
-        profiles->addWidget(profile_, 1);
-        profileName_ = new QLineEdit(central); profileName_->setObjectName(QStringLiteral("profileName"));
-        profileName_->setPlaceholderText(QStringLiteral("App executable / WM_CLASS, e.g. firefox"));
-        profiles->addWidget(profileName_, 2);
-        auto* addProfile = new QPushButton(QStringLiteral("Add profile"), central);
+        profile_->addItem(QStringLiteral("全局设置"), QStringLiteral("global"));profile_->hide();
+        profileEditor_=new QWidget(central);auto* profiles=new QHBoxLayout(profileEditor_);
+        profiles->addStretch();
+        profileName_ = new QLineEdit(profileEditor_); profileName_->setObjectName(QStringLiteral("profileName"));
+        profileName_->setPlaceholderText(QStringLiteral("应用名称，例如 firefox"));profileName_->setMaximumWidth(340);
+        profiles->addWidget(profileName_);
+        auto* addProfile = new QPushButton(QStringLiteral("添加应用"), profileEditor_);
         addProfile->setObjectName(QStringLiteral("addProfile")); profiles->addWidget(addProfile);
-        layout->addLayout(profiles);
+        layout->addWidget(profileEditor_);profileEditor_->hide();
+        auto* body=new QHBoxLayout;body->setSpacing(24);layout->addLayout(body,1);
+        auto* navigation=new QVBoxLayout;navigation->setSpacing(12);navigation->addStretch();body->addLayout(navigation);
         auto* tabs = new QTabWidget(central);
         tabs->setObjectName(QStringLiteral("pages"));
-        layout->addWidget(tabs, 1);
+        tabs->tabBar()->hide();pages_=tabs;
+        body->addWidget(tabs, 1);
         tabs->addTab(settingsPage(), QStringLiteral("Point & scroll"));
         tabs->addTab(mappingsPage(), QStringLiteral("Buttons & gestures"));
         tabs->addTab(smartPage(), QStringLiteral("Smart Actions"));
         tabs->addTab(ringPage(), QStringLiteral("Actions Ring"));
         tabs->addTab(advancedPage(), QStringLiteral("Configuration"));
+        tabs->addTab(informationPage(QStringLiteral("Easy-Switch"),QStringLiteral("按下鼠标底部的 Easy-Switch 按钮，在已配对的电脑之间切换。")),QStringLiteral("Easy-Switch"));
+        tabs->addTab(informationPage(QStringLiteral("Flow"),QStringLiteral("当前版本尚未实现跨电脑跟随和剪贴板。")),QStringLiteral("Flow"));
+        auto* settings=new QWidget;auto* settingsLayout=new QVBoxLayout(settings);settingsLayout->setContentsMargins(60,60,60,60);
+        settingsLayout->addWidget(new QLabel(QStringLiteral("设置")));settingsLayout->addWidget(device_);
+        settingsLayout->addWidget(new QLabel(QStringLiteral("独立第三方实验软件 · 无需安装原版 Options+")));
+        agent_ = new QLabel(QStringLiteral("后台状态未读取"), settings);settingsLayout->addWidget(agent_);
+        auto* controls=new QHBoxLayout;start_=new QPushButton(QStringLiteral("启动后台"));stop_=new QPushButton(QStringLiteral("停止后台"));
+        controls->addWidget(start_);controls->addWidget(stop_);controls->addStretch();settingsLayout->addLayout(controls);
+        auto* advanced=new QPushButton(QStringLiteral("高级配置"));settingsLayout->addWidget(advanced);settingsLayout->addStretch();
+        tabs->addTab(settings,QStringLiteral("设置"));
+        const QList<QPair<QString,int>> navigationPages{{QStringLiteral("按钮"),1},{QStringLiteral("指向和滚动"),0},
+            {QStringLiteral("EASY-SWITCH"),5},{QStringLiteral("FLOW"),6},{QStringLiteral("设置"),7}};
+        auto* navGroup=new QButtonGroup(this);navGroup->setExclusive(true);
+        for(const auto& [caption,index]:navigationPages){
+            auto* button=new QPushButton(caption);button->setObjectName(QStringLiteral("nav%1").arg(index));
+            button->setProperty("navigation",true);button->setCheckable(true);button->setFixedWidth(160);button->setMinimumHeight(44);
+            navGroup->addButton(button,index);navigation->addWidget(button);
+            connect(button,&QPushButton::clicked,this,[this,index]{pages_->setCurrentIndex(index);});
+        }
+        navigation->addStretch();
+        connect(tabs,&QTabWidget::currentChanged,this,[this,navGroup](int index){
+            if(auto* button=navGroup->button(index))button->setChecked(true);
+            profileEditor_->hide();rebuildProfiles();
+        });
+        connect(smart,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(2);});
+        connect(ring,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(3);});
+        connect(advanced,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(4);});
+        connect(home,&QPushButton::clicked,this,[tabs]{tabs->setCurrentIndex(1);});
+        tabs->setCurrentIndex(1);
         auto* footer = new QHBoxLayout;
-        agent_ = new QLabel(QStringLiteral("Backend status not read"), central);
-        footer->addWidget(agent_, 1);
-        start_ = new QPushButton(QStringLiteral("Start backend"), central);
-        stop_ = new QPushButton(QStringLiteral("Stop backend"), central);
-        footer->addWidget(start_);
-        footer->addWidget(stop_);
+        battery_=new QLabel(QStringLiteral("电量 —"));battery_->setObjectName("battery");footer->addWidget(battery_);footer->addStretch();
         layout->addLayout(footer);
         status_ = new QLabel(central);
         status_->setObjectName(QStringLiteral("statusMessage"));
         status_->setWordWrap(true);
-        status_->setMinimumHeight(44);
+        status_->setMinimumHeight(24);
         layout->addWidget(status_);
         setCentralWidget(central);
         connect(profile_, &QComboBox::currentIndexChanged, this, [this] { if (!loading_) setEditors(draft_); });
@@ -210,11 +266,14 @@ public:
                 draft_ += QStringLiteral("\n[") + name + QStringLiteral("]\n");
                 const QSignalBlocker block(profile_); profile_->addItem(name, name); index = profile_->count() - 1;
             }
-            profile_->setCurrentIndex(index); profileName_->clear(); setEditors(draft_); scheduleSave();
+            profile_->setCurrentIndex(index); profileName_->clear();profileEditor_->hide(); setEditors(draft_); scheduleSave();
         });
         setStyleSheet(QStringLiteral(
-            "QMainWindow,QWidget{background:#1b1d1d;color:#eeeeee;font-size:14px;}"
-            "QTabWidget::pane,QGroupBox{border:1px solid #3b4040;border-radius:8px;}"
+            "QMainWindow,QWidget{background:#1a1a1a;color:#eeeeee;font-size:15px;}"
+            "QTabWidget::pane{border:0;}QPushButton[navigation=true]{text-align:left;border:0;background:transparent;padding:12px;}"
+            "QPushButton[navigation=true]:checked{color:#00d8c6;background:#222222;}"
+            "QWidget#drawer{background:#101010;}QLabel#battery{background:#101010;color:#8fe34a;border-radius:5px;padding:12px;}"
+            "QGroupBox{border:1px solid #3b4040;border-radius:8px;}"
             "QGroupBox{margin-top:14px;padding:18px;}QGroupBox::title{subcontrol-origin:margin;left:12px;}"
             "QPushButton,QComboBox,QSpinBox{background:#292d2c;border:1px solid #4c5553;border-radius:5px;padding:8px;}"
             "QPushButton:hover{border-color:#00c7b5;}QPushButton:disabled{color:#737c7a;}"
@@ -303,6 +362,9 @@ public:
         }
         thumbInvertSupported_ = settings.value(QStringLiteral("thumb-invert")).isDouble();
         updateThumbInvert();
+        battery_->setText(object.value("battery").isDouble()?QStringLiteral("%1%  ▰").arg(object.value("battery").toInt()):QStringLiteral("电量 —"));
+        pointerCanvas_->setLabels({QStringLiteral("SmartShift: %1").arg(smartShift_->value()?QStringLiteral("开启"):QStringLiteral("关闭")),
+            QStringLiteral("%1 DPI").arg(dpi_->value()),QStringLiteral("水平滚动")});
         loading_ = false;
     }
 
@@ -313,11 +375,62 @@ public:
     }
 
 private:
+    QWidget* informationPage(const QString& title,const QString& detail) {
+        auto* page=new QWidget;auto* layout=new QVBoxLayout(page);layout->setContentsMargins(80,80,80,80);layout->addStretch();
+        auto* heading=new QLabel(title);heading->setStyleSheet("font-size:30px;font-weight:600;");layout->addWidget(heading);
+        auto* description=new QLabel(detail);description->setWordWrap(true);layout->addWidget(description);layout->addStretch();return page;
+    }
+    void rebuildProfiles() {
+        if(!profileBar_)return;
+        while(auto* item=profileBar_->takeAt(0)){if(auto* widget=item->widget())widget->deleteLater();delete item;}
+        profileBar_->addStretch();
+        if(!pages_ || (pages_->currentIndex()!=0 && pages_->currentIndex()!=1))return;
+        const int count=pages_->currentIndex()==0?1:profile_->count();
+        for(int i=0;i<count;++i){
+            const auto name=profile_->itemData(i).toString();
+            auto* button=new QPushButton(name=="global"?QStringLiteral("⊞"):name.left(1).toUpper());
+            button->setObjectName(QStringLiteral("profile_%1").arg(name));button->setFixedSize(48,48);
+            button->setToolTip(name=="global"?QStringLiteral("全局设置"):name);button->setAccessibleName(button->toolTip());
+            if(name.contains("firefox")||name.contains("chrome")||name.contains("wps")) {
+                const auto asset=name.contains("firefox")?"firefox":name.contains("chrome")?"chrome":"wps";
+                button->setIcon(QIcon(QStringLiteral(":/assets/%1.png").arg(asset)));button->setIconSize(QSize(30,30));button->setText({});
+            }
+            const bool selected=pages_->currentIndex()==0?i==0:i==profile_->currentIndex();
+            button->setStyleSheet(QStringLiteral("QPushButton{border:0;border-radius:0;background:transparent;font-size:25px;border-bottom:3px solid %1;}QPushButton:hover{background:#242424;}").arg(selected?"#00d8c6":"transparent"));
+            connect(button,&QPushButton::clicked,this,[this,i]{profile_->setCurrentIndex(i);rebuildProfiles();});profileBar_->addWidget(button);
+        }
+        if(pages_->currentIndex()==1){
+            auto* add=new QPushButton(QStringLiteral("＋"));add->setObjectName("openAddProfile");add->setAccessibleName(QStringLiteral("添加应用程序"));add->setFixedSize(48,48);
+            connect(add,&QPushButton::clicked,this,[this]{profileEditor_->setVisible(!profileEditor_->isVisible());profileName_->setFocus();});profileBar_->addWidget(add);
+        }
+    }
+    void syncCanvases() {
+        if(buttonCanvas_){
+            auto values=globalBindings(draft_);const auto overrides=globalBindings(draft_,profile_->currentData().toString());
+            for(auto it=overrides.cbegin();it!=overrides.cend();++it)values[it.key()]=it.value();
+            auto caption=[](QString value){
+                static const QMap<QString,QString> names{{"MouseMiddle",QStringLiteral("中键")},{"MouseBack",QStringLiteral("后退")},
+                    {"MouseForward",QStringLiteral("前进")},{"WheelMode",QStringLiteral("切换滚轮模式")},{"Super+Tab",QStringLiteral("任务视图")},
+                    {"VolumeDown",QStringLiteral("音量降低")},{"VolumeUp",QStringLiteral("音量升高")}};
+                return names.value(value,value);
+            };
+            buttonCanvas_->setLabels({caption(values.value("0052")),caption(values.value("00c4")),
+                caption(values.value("thumb.left"))+QStringLiteral(" / ")+caption(values.value("thumb.right")),
+                caption(values.value("0056")),caption(values.value("0053")),caption(values.value("00c3"))});
+        }
+        rebuildProfiles();
+    }
     QWidget* settingsPage() {
         auto* page = new QWidget;
-        auto* layout = new QVBoxLayout(page);
-        auto* group = new QGroupBox(QStringLiteral("Mouse settings"), page);
+        auto* body=new QHBoxLayout(page);body->setContentsMargins(0,0,0,0);body->setSpacing(0);
+        pointerCanvas_=new loo_ui::DeviceCanvas;pointerCanvas_->setMode(loo_ui::DeviceMode::Pointer);body->addWidget(pointerCanvas_,1);
+        auto* drawer=new QWidget;drawer->setObjectName("drawer");drawer->setFixedWidth(352);body->addWidget(drawer);
+        auto* layout = new QVBoxLayout(drawer);layout->setContentsMargins(24,28,24,28);
+        auto* top=new QHBoxLayout;auto* title=new QLabel(QStringLiteral("滚轮"));title->setStyleSheet("font-size:24px;font-weight:600;");top->addWidget(title);top->addStretch();
+        auto* close=new QPushButton(QStringLiteral("×"));close->setAccessibleName(QStringLiteral("关闭侧栏"));close->setFixedSize(36,36);top->addWidget(close);layout->addLayout(top);
+        auto* group = new QGroupBox(drawer);group->setStyleSheet("QGroupBox{border:0;margin:0;padding:8px 0;}");
         auto* form = new QFormLayout(group);
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);form->setRowWrapPolicy(QFormLayout::WrapAllRows);form->setVerticalSpacing(20);
         auto* dpiRow = new QWidget(group);
         auto* dpiLayout = new QHBoxLayout(dpiRow);
         dpiLayout->setContentsMargins(0, 0, 0, 0);
@@ -328,19 +441,19 @@ private:
         dpi_->setKeyboardTracking(false);
         dpi_->setEnabled(false); slider_->setEnabled(false);
         dpiLayout->addWidget(slider_, 1); dpiLayout->addWidget(dpi_);
-        form->addRow(QStringLiteral("Pointer speed"), dpiRow);
+        form->addRow(QStringLiteral("指针速度"), dpiRow);
         smartShift_ = new QSpinBox(group);
         smartShift_->setRange(0, 50);
         smartShift_->setKeyboardTracking(false);
         smartShift_->setSpecialValueText(QStringLiteral("Disabled"));
         smartShift_->setEnabled(false);
-        form->addRow(QStringLiteral("SmartShift sensitivity"), smartShift_);
+        form->addRow(QStringLiteral("SmartShift 灵敏度"), smartShift_);
         for (const auto& pair : QList<QPair<QString, QString>>{
-                 {QStringLiteral("ratchet"), QStringLiteral("Ratchet scroll mode")},
-                 {QStringLiteral("hires"), QStringLiteral("High resolution scrolling")},
-                 {QStringLiteral("invert"), QStringLiteral("Reverse main wheel")},
-                 {QStringLiteral("thumb-invert"), QStringLiteral("Reverse thumb wheel")}}) {
-            auto* check = new QCheckBox(pair.second, group);
+                 {QStringLiteral("ratchet"), QStringLiteral("逐行模式")},
+                 {QStringLiteral("hires"), QStringLiteral("高分辨率滚动")},
+                 {QStringLiteral("invert"), QStringLiteral("反转滚动方向")},
+                 {QStringLiteral("thumb-invert"), QStringLiteral("反转拇指滚轮")}}) {
+            auto* check = new Toggle(pair.second, group);
             check->setEnabled(false);
             checks_.insert(pair.first, check);
             form->addRow(check);
@@ -355,20 +468,32 @@ private:
         connect(dpi_, &QSpinBox::valueChanged, this, [this](int value) { setSetting(QStringLiteral("dpi"), value); });
         connect(smartShift_, &QSpinBox::valueChanged, this, [this](int value) { setSetting(QStringLiteral("smartshift"), value); });
         layout->addWidget(group);
-        auto* description = new QLabel(QStringLiteral("Changes apply immediately. Unsupported settings remain disabled.\n"
-            "The backend requires access to your Logitech hidraw device and /dev/uinput.\n"
-            "Stop other mouse remapping software before starting this backend."), page);
+        auto* description = new QLabel(QStringLiteral("更改立即生效"), drawer);
         description->setWordWrap(true);
         layout->addWidget(description);
         layout->addStretch();
+        pointerCanvas_->selected=[this,drawer,title,form,dpiRow](int index){
+            pointerCanvas_->setSelected(index);title->setText(QStringList{QStringLiteral("滚轮"),QStringLiteral("指针速度"),QStringLiteral("拇指滚轮")}[index]);
+            form->setRowVisible(dpiRow,index==1);form->setRowVisible(smartShift_,index==0);
+            for(auto it=checks_.cbegin();it!=checks_.cend();++it)form->setRowVisible(it.value(),it.key()=="thumb-invert"?index==2:index==0);
+            drawer->show();
+        };
+        connect(close,&QPushButton::clicked,this,[this,drawer]{drawer->hide();pointerCanvas_->setSelected(-1);});drawer->hide();
         return page;
     }
 
     QWidget* mappingsPage() {
+        auto* outer=new QWidget;auto* body=new QHBoxLayout(outer);body->setContentsMargins(0,0,0,0);body->setSpacing(0);
+        buttonCanvas_=new loo_ui::DeviceCanvas;body->addWidget(buttonCanvas_,1);
+        auto* drawer=new QWidget;drawer->setObjectName("drawer");drawer->setFixedWidth(352);body->addWidget(drawer);
+        auto* drawerLayout=new QVBoxLayout(drawer);drawerLayout->setContentsMargins(24,28,24,28);
+        auto* top=new QHBoxLayout;auto* title=new QLabel;title->setStyleSheet("font-size:24px;font-weight:600;");top->addWidget(title);top->addStretch();
+        auto* close=new QPushButton(QStringLiteral("×"));close->setAccessibleName(QStringLiteral("关闭侧栏"));close->setFixedSize(36,36);top->addWidget(close);drawerLayout->addLayout(top);
         auto* scroll = new QScrollArea;
-        scroll->setWidgetResizable(true);
+        scroll->setWidgetResizable(true);scroll->setFrameShape(QFrame::NoFrame);drawerLayout->addWidget(scroll);
         auto* page = new QWidget;
         auto* form = new QFormLayout(page);
+        form->setRowWrapPolicy(QFormLayout::WrapAllRows);form->setVerticalSpacing(20);
         const QStringList suggestions{QStringLiteral("MouseMiddle"), QStringLiteral("MouseBack"),
             QStringLiteral("MouseForward"), QStringLiteral("WheelMode"), QStringLiteral("Super+Tab"),
             QStringLiteral("Super+D"), QStringLiteral("Super"), QStringLiteral("Ctrl+Alt+Left"),
@@ -401,13 +526,18 @@ private:
                 scheduleSave();
             });
         }
-        auto* help = new QLabel(QStringLiteral("Mappings are validated and saved automatically.\n"
-            "Application overrides inherit missing mappings from Global. Desktop integration selects the active profile.\n"
-            "Native GNOME Wayland requires the optional desktop bridge extension. Desktop shortcuts depend on your compositor; Flow is not implemented."), page);
+        auto* help = new QLabel(QStringLiteral("更改立即生效。应用专属设置会继承未修改的全局设置。"), page);
         help->setWordWrap(true);
         form->addRow(help);
         scroll->setWidget(page);
-        return scroll;
+        buttonCanvas_->selected=[this,drawer,title,form](int index){
+            buttonCanvas_->setSelected(index);title->setText(QStringList{QStringLiteral("中键"),QStringLiteral("顶部按钮"),QStringLiteral("拇指滚轮"),QStringLiteral("前进"),QStringLiteral("后退"),QStringLiteral("手势")}[index]);
+            const QStringList prefixes{"0052","00c4","thumb.","0056","0053","00c3"};
+            for(auto it=bindings_.cbegin();it!=bindings_.cend();++it)form->setRowVisible(it.value(),it.key().startsWith(prefixes[index]));
+            drawer->show();
+        };
+        connect(close,&QPushButton::clicked,this,[this,drawer]{drawer->hide();buttonCanvas_->setSelected(-1);});drawer->hide();
+        return outer;
     }
 
     QString smartSection() const {
@@ -424,6 +554,9 @@ private:
     QWidget* smartPage() {
         auto* page = new QWidget;
         auto* layout = new QVBoxLayout(page);
+        layout->setContentsMargins(64,24,64,24);layout->setSpacing(20);
+        auto* title=new QLabel(QStringLiteral("创建 Smart Actions"));title->setStyleSheet("font-size:30px;font-weight:600;");layout->addWidget(title);
+        auto* when=new QLabel(QStringLiteral("如果…"));when->setStyleSheet("font-size:22px;");layout->addWidget(when);
         auto* form = new QFormLayout;
         smartForm_ = form;
         trigger_ = new QComboBox(page); trigger_->setObjectName(QStringLiteral("smartTrigger"));
@@ -433,28 +566,30 @@ private:
             {QStringLiteral("Gesture click"), QStringLiteral("00c3")}, {QStringLiteral("Gesture left"), QStringLiteral("00c3.left")},
             {QStringLiteral("Gesture right"), QStringLiteral("00c3.right")}, {QStringLiteral("Global shortcut"), QStringLiteral("hotkey")}};
         for (const auto& pair : triggers) trigger_->addItem(pair.first, pair.second);
-        form->addRow(QStringLiteral("When"), trigger_);
+        form->addRow(QStringLiteral("触发器"), trigger_);
         hotkey_ = new QKeySequenceEdit(page); hotkey_->setObjectName(QStringLiteral("smartHotkey"));
         hotkey_->setKeySequence(QKeySequence(QStringLiteral("Ctrl+Shift+F10"))); hotkey_->setEnabled(false);
         form->addRow(QStringLiteral("Shortcut trigger"), hotkey_);
         form->setRowVisible(hotkey_, false);
         layout->addLayout(form);
+        auto* then=new QLabel(QStringLiteral("那么…"));then->setStyleSheet("font-size:22px;");layout->addWidget(then);
         steps_ = new QTableWidget(0, 2, page); steps_->setObjectName(QStringLiteral("smartSteps"));
+        steps_->setShowGrid(false);steps_->setFrameShape(QFrame::NoFrame);steps_->verticalHeader()->hide();steps_->horizontalHeader()->hide();
+        steps_->setStyleSheet("QTableWidget{background:#1a1a1a;border:0;}QTableWidget QLineEdit,QTableWidget QComboBox{background:#101010;border:0;border-radius:8px;padding:14px;}");
         steps_->setHorizontalHeaderLabels({QStringLiteral("Then"), QStringLiteral("Value")});
         steps_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
         steps_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
         steps_->setSelectionBehavior(QAbstractItemView::SelectRows);
         layout->addWidget(steps_, 1);
         auto* buttons = new QHBoxLayout;
-        auto* add = new QPushButton(QStringLiteral("Add step"), page); add->setObjectName(QStringLiteral("addStep"));
-        auto* remove = new QPushButton(QStringLiteral("Remove step"), page); remove->setObjectName(QStringLiteral("removeStep"));
-        auto* up = new QPushButton(QStringLiteral("Move up"), page); up->setObjectName(QStringLiteral("stepUp"));
-        auto* down = new QPushButton(QStringLiteral("Move down"), page); down->setObjectName(QStringLiteral("stepDown"));
-        auto* play = new QPushButton(QStringLiteral("Try sequence"), page); play->setObjectName(QStringLiteral("trySequence"));
+        auto* add = new QPushButton(QStringLiteral("＋ 添加操作"), page); add->setObjectName(QStringLiteral("addStep"));
+        auto* remove = new QPushButton(QStringLiteral("移除"), page); remove->setObjectName(QStringLiteral("removeStep"));
+        auto* up = new QPushButton(QStringLiteral("上移"), page); up->setObjectName(QStringLiteral("stepUp"));
+        auto* down = new QPushButton(QStringLiteral("下移"), page); down->setObjectName(QStringLiteral("stepDown"));
+        auto* play = new QPushButton(QStringLiteral("试试看"), page); play->setObjectName(QStringLiteral("trySequence"));
         for (auto* button : {add, remove, up, down, play}) buttons->addWidget(button);
         layout->addLayout(buttons);
-        auto* help = new QLabel(QStringLiteral("Changes save automatically to the selected trigger. Choose an action type for each step.\n"
-            "Try sequence executes real input against the focused application; the backend must have input permission."), page);
+        auto* help = new QLabel(QStringLiteral("更改自动保存并生效。"), page);
         help->setWordWrap(true); layout->addWidget(help);
         connect(trigger_, &QComboBox::currentIndexChanged, this, [this] { if (!loading_) loadSmart(); });
         connect(hotkey_, &QKeySequenceEdit::keySequenceChanged, this, [this] { if (!loading_) loadSmart(); });
@@ -478,7 +613,7 @@ private:
         choice->setCurrentText(type); steps_->setCellWidget(row, 0, choice);
         auto* input = new QLineEdit(value, steps_); steps_->setCellWidget(row, 1, input);
         input->setPlaceholderText(type == QStringLiteral("Wait") ? QStringLiteral("Milliseconds, e.g. 400") : QStringLiteral("Action value"));
-        steps_->setRowHeight(row, 48);
+        steps_->setRowHeight(row, 66);
         connect(input, &QLineEdit::textEdited, this, [this] { updateSmart(); });
         connect(choice, &QComboBox::currentTextChanged, this, [this, input](const QString& type) {
             input->setPlaceholderText(type == QStringLiteral("Wait") ? QStringLiteral("Milliseconds, e.g. 400") :
@@ -629,6 +764,7 @@ private:
             it.value()->setCurrentText(entries.value(it.key()));
         if (updateSteps) loadSmart();
         loading_ = false;
+        syncCanvases();
     }
 
     void message(const QString& text, bool error = false) {
@@ -771,7 +907,11 @@ private:
     bool runtime_ = true, loading_ = false, timedOut_ = false;
     bool backendRunning_ = false, thumbInvertSupported_ = false;
     unsigned revision_ = 0;
-    QLabel *device_{}, *agent_{}, *status_{};
+    QLabel *device_{}, *agent_{}, *status_{}, *battery_{};
+    QHBoxLayout* profileBar_{};
+    QWidget* profileEditor_{};
+    QTabWidget* pages_{};
+    loo_ui::DeviceCanvas *buttonCanvas_{},*pointerCanvas_{};
     QSpinBox *dpi_{}, *smartShift_{};
     QSlider* slider_{};
     QPlainTextEdit* advanced_{};
@@ -853,17 +993,23 @@ int interactionTests() {
         return condition();
     };
     auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("pages"));
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("openAddProfile")),Qt::LeftButton);
     auto* profileName = window.findChild<QLineEdit*>(QStringLiteral("profileName"));
     QTest::mouseClick(profileName, Qt::LeftButton); QTest::keyClicks(profileName, "firefox");
     QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("addProfile")), Qt::LeftButton);
     if (!await([&] { return readFile(path).contains(QStringLiteral("[firefox]")); })) return 13;
-    QTest::mouseClick(tabs->tabBar(), Qt::LeftButton, Qt::NoModifier, tabs->tabBar()->tabRect(1).center());
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("nav1")),Qt::LeftButton);
+    QTest::mouseClick(tabs->widget(1)->findChild<QPushButton*>(QStringLiteral("hotspot_4")),Qt::LeftButton);
     auto* mapping = window.findChild<QComboBox*>(QStringLiteral("binding_0053"));
     QTest::mouseClick(mapping->lineEdit(), Qt::LeftButton);
     QTest::keyClick(mapping->lineEdit(), Qt::Key_A, Qt::ControlModifier); QTest::keyClicks(mapping->lineEdit(), "Ctrl+Tab");
     if (!await([&] { return globalBindings(readFile(path), QStringLiteral("firefox")).value(QStringLiteral("0053")) == QStringLiteral("Ctrl+Tab"); })) return 14;
     if (globalBindings(readFile(path)).value(QStringLiteral("0053")) != QStringLiteral("MouseBack")) return 15;
-    QTest::mouseClick(tabs->tabBar(), Qt::LeftButton, Qt::NoModifier, tabs->tabBar()->tabRect(2).center());
+    if (!screenshot(window,QStringLiteral("linux-button-sidebar.png")))return 30;
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("nav0")),Qt::LeftButton);
+    QTest::mouseClick(tabs->widget(0)->findChild<QPushButton*>(QStringLiteral("hotspot_1")),Qt::LeftButton);
+    if (!screenshot(window,QStringLiteral("linux-pointer-sidebar.png")))return 31;
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("navSmart")),Qt::LeftButton);
     QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("addStep")), Qt::LeftButton);
     auto* steps = window.findChild<QTableWidget*>(QStringLiteral("smartSteps"));
     auto* value = static_cast<QLineEdit*>(steps->cellWidget(steps->rowCount()-1, 1));
@@ -879,7 +1025,7 @@ int interactionTests() {
     if (!await([&] { return readFile(path).contains(QStringLiteral("Wait(300)")); })) return 19;
     QString selected;
     loo_ui::RingDialog ring(loo_ui::readRing(initial)); ring.selected = [&](const QString& action) { selected = action; };
-    ring.show(); if (!QTest::qWaitForWindowExposed(&ring)) return 20;
+    ring.show();ring.activateWindow(); if (!QTest::qWaitForWindowExposed(&ring)||!QTest::qWaitForWindowActive(&ring)) return 20;
     QTest::mouseClick(ring.findChild<QPushButton*>(QStringLiteral("ringItem0")), Qt::LeftButton);
     QTest::qWait(10);
     if (ring.findChild<QPushButton*>(QStringLiteral("ringBack"))->text() != QStringLiteral("Back")) return 21;
@@ -891,8 +1037,8 @@ int interactionTests() {
     QTest::keyClick(QApplication::focusWidget(), Qt::Key_Right);
     QTest::keyClick(QApplication::focusWidget(), Qt::Key_Return);
     if (selected != QStringLiteral("PreviousTrack") || ring.isVisible()) return 23;
-    loo_ui::RingDialog cancel(loo_ui::readRing(initial)); cancel.show();
-    if (!QTest::qWaitForWindowExposed(&cancel)) return 24;
+    loo_ui::RingDialog cancel(loo_ui::readRing(initial)); cancel.show();cancel.activateWindow();
+    if (!QTest::qWaitForWindowExposed(&cancel)||!QTest::qWaitForWindowActive(&cancel)) return 24;
     QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
     if (cancel.isVisible()) return 25;
     window.close();
