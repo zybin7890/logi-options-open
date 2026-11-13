@@ -113,6 +113,10 @@ def write_config(args):
     # that saving failed, or roll back a file the running agent may already read.
     try:
         notification = cli("reload", CONFIG, structured=True)
+        if WINDOWS and type(notification) is dict and "confirmed" in notification:
+            if notification["confirmed"] is not True or notification.get("status") != "applied":
+                raise BridgeError("Backend did not confirm the new configuration was applied.", 503)
+            return {**notification, "saved": True, "reload_requested": True, "reloaded": True}
         if (type(notification) is not dict or "reload_requested" not in notification
                 or type(notification["reload_requested"]) is not bool):
             raise BridgeError("Invalid reload response.", 503)

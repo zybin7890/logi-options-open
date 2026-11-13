@@ -286,10 +286,27 @@ bool running(){
 }
 std::string transact(const std::string& command,unsigned timeout_ms){
     if(command.empty()||command.size()>=65536)throw std::runtime_error("Invalid IPC command length");
-    Fd socket(::socket(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0));auto addr=address();
-    if(socket.value<0||::connect(socket.value,reinterpret_cast<sockaddr*>(&addr),sizeof(addr)))throw std::runtime_error("Linux daemon IPC is unavailable");
+    const auto deadline=Clock::now()+std::chrono::milliseconds(timeout_ms);
+    auto remaining=[&]{return std::max(0,static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(deadline-Clock::now()).count()));};
+    Fd socket;auto addr=address();
+    for(;;){
+        socket=Fd(::socket(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0));
+        if(socket.value<0)throw std::runtime_error("Cannot create daemon client socket");
+        if(::connect(socket.value,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0)break;
+        const int error=errno;
+        // The daemon owns the lock before it binds/listens. A previous socket
+        // can also remain after a crash. Wait only for this startup window,
+        // within the caller's original budget; no command has been sent yet.
+        if((error!=ENOENT&&error!=ECONNREFUSED)||!running())
+            throw std::runtime_error("Linux daemon IPC is unavailable");
+        const auto left=remaining();
+        if(!left)throw std::runtime_error("Daemon IPC startup timed out; command was not sent");
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::min(left,10)));
+    }
+    if(!remaining())throw std::runtime_error("Daemon IPC startup timed out; command was not sent");
     if(send(socket.value,command.data(),command.size(),MSG_NOSIGNAL)!=static_cast<ssize_t>(command.size()))throw std::runtime_error("Cannot send daemon command");
-    pollfd wait{socket.value,POLLIN,0};int result;do{result=poll(&wait,1,static_cast<int>(timeout_ms));}while(result<0&&errno==EINTR);
+    // Once sent, never reconnect/replay a possibly applied setting or action.
+    pollfd wait{socket.value,POLLIN,0};int result;do{result=poll(&wait,1,remaining());}while(result<0&&errno==EINTR&&remaining());
     if(result<=0)throw std::runtime_error("Daemon command timed out; completion is unknown");
     char buffer[65536];const auto size=recv(socket.value,buffer,sizeof(buffer),MSG_TRUNC);
     if(size<=0||size>=static_cast<ssize_t>(sizeof(buffer)))throw std::runtime_error("Daemon closed without a valid acknowledgement");

@@ -67,3 +67,8 @@ test or proof of no memory leak.
 Actual reboot/logon, suspend/resume, unplug/reconnect cycles, long-term operation,
 full UI/motion review, remaining gesture semantics, Flow and other missing
 features remain open in REPLACEMENT-ACCEPTANCE.md. No stable Release is made.
+## 后续接口验收（2026-11-13）
+
+最后一次后台进程重启后，用户再次确认侧键、主滚轮、拇指滚轮和拇指手势全部正常。现场复核官方 Options+ 进程为 0，Updater 服务已停止并禁用；自研后台保持同一 PID，映射与设置就绪。
+
+修复 Python API/MCP 对新 Windows CLI 重载确认格式的误判。8 项针对性回归通过，包括已应用、未确认、失败后仍保留已保存文件，以及旧 Windows/Linux 返回格式。真实 HTTP PUT 与独立 MCP stdio 子进程均将原配置原样重载到运行中的后台，收到 `confirmed:true`、`status:applied`、正确的 PID 和文件 SHA-256；个人配置字节及后台 PID 未变。此操作未重启后台。
