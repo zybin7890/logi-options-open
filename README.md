@@ -1,5 +1,7 @@
 # Logi Options Open
 
+> **当前优先 Windows 原生版开发。** 最新旧版 Win32 界面及后台候选见 [windows-native](windows-native/README.md)，其中包含独立构建入口和 35 项离线手势测试。候选尚未通过完整实体鼠标及重启验收，不作为稳定发行版；下文的共享 Qt / Linux 版本保留，本轮没有更新。
+
 **独立第三方、实验性、尚不成熟。与 Logitech / 罗技无隶属关系，未获其认可或支持。**
 
 原生鼠标设置与改键工具，面向支持 HID++ 2.0 的 Logitech 鼠标，首先适配 MX Master 3S。Windows 和 Linux 直接编译同一份 `ui/` C++26 / Qt6 Widgets 界面与资源，不使用浏览器，也不分别维护两套页面。系统路径、快捷键与命令确认差异集中于 `ui/platform.cpp`；后台分别使用 Windows HID API 与 Linux hidapi / uinput。没有账号、广告、营销或遥测。
