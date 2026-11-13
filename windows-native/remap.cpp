@@ -5,6 +5,7 @@
 #include "reload_ipc.hpp"
 #include "settings_ipc.hpp"
 #include "gesture_lifecycle.hpp"
+#include "continuous_media.hpp"
 
 #include <tlhelp32.h>
 #include <shellapi.h>
@@ -143,7 +144,7 @@ BOOL WINAPI console_event(DWORD event) {
 
 enum class Gesture { tap, left, right, up, down };
 enum class Operation { keys, lock, minimize, maximize, wheel_mode, scroll_left, scroll_right, zoom_in, zoom_out,
-                       pan, wait, text, open, ring, folder };
+                       pan, wait, text, open, ring, folder, continuous_media };
 constexpr unsigned thumb_wheel = 0x10000;
 
 struct Action {
@@ -183,6 +184,8 @@ struct Mappings {
     std::vector<Hotkey> hotkeys;
     std::optional<unsigned> thumb_speed;
 };
+
+bool valid_media_bindings(const std::vector<Binding>& bindings);
 
 int show_ring(std::span<const RingItem> ring, HANDLE stop, bool submenu = false) {
     std::array<std::wstring, 8> labels;
@@ -225,6 +228,8 @@ struct Control {
     bool first_motion{};
     bool panning{};
     bool pan_scrolled{};
+    bool continuous_media{};
+    pointer_gesture::ContinuousMedia media;
     int x{}, y{};
     bool wait_release{};
     int threshold{83},counts_per_pan_step{62};
@@ -238,6 +243,7 @@ void cancel_gesture(Control& control,bool fence=true) {
     control.wait_release=fence?(control.wait_release||control.down):false;
     control.down=false;control.first_motion=false;control.panning=false;control.pan_scrolled=false;
     control.x=control.y=0;control.captured={};control.owner={};
+    control.continuous_media=false;control.media.reset();
 }
 
 struct Wheel {
@@ -301,6 +307,10 @@ bool parse_action(std::wstring_view chord, Action& action) {
     else if (chord == L"ZoomIn") action.operation = Operation::zoom_in;
     else if (chord == L"ZoomOut") action.operation = Operation::zoom_out;
     else if (chord == L"Pan") action.operation = Operation::pan;
+    else if (chord == L"GestureMedia") {
+        action.operation=Operation::continuous_media;
+        action.keys[0]=VK_MEDIA_PLAY_PAUSE;
+    }
     else if (chord == L"Ring") action.operation = Operation::ring;
     else if (chord.starts_with(L"Folder(") && chord.ends_with(L")")) {
         action.operation = Operation::folder;
@@ -370,7 +380,7 @@ bool parse_actions(std::wstring_view remaining, std::vector<Action>& actions) {
     }
     return actions.size() == 1 || std::ranges::none_of(actions, [](const Action& action) {
         return action.operation == Operation::ring || action.operation == Operation::folder ||
-               action.operation == Operation::pan;
+               action.operation == Operation::pan || action.operation == Operation::continuous_media;
     });
 }
 
@@ -400,7 +410,8 @@ bool add_binding(std::wstring_view line, const std::wstring& app, std::vector<Bi
     Binding binding{app, *id, gesture, {}};
     if (!parse_actions(line.substr(equals + 1), binding.actions)) return false;
     if (binding.actions[0].operation == Operation::folder ||
-        (binding.actions[0].operation == Operation::pan && gesture != Gesture::tap) ||
+        ((binding.actions[0].operation == Operation::pan ||
+          binding.actions[0].operation == Operation::continuous_media) && gesture != Gesture::tap) ||
         (*id == thumb_wheel && binding.actions[0].operation == Operation::ring)) return false;
     bindings.push_back(std::move(binding));
     return true;
@@ -415,6 +426,7 @@ bool add_ring_item(std::wstring_view line, std::vector<RingItem>& items, bool ro
     if (!parse_actions(line.substr(equals + 1), item.binding.actions) ||
         item.binding.actions[0].operation == Operation::ring ||
         item.binding.actions[0].operation == Operation::pan ||
+        item.binding.actions[0].operation == Operation::continuous_media ||
         (!root && item.binding.actions[0].operation == Operation::folder)) return false;
     items.push_back(std::move(item));
     return true;
@@ -443,7 +455,8 @@ bool add_hotkey(std::wstring_view line, std::vector<Hotkey>& hotkeys) {
         })) return false;
     if (!parse_actions(line.substr(equals + 1), hotkey.binding.actions) ||
         hotkey.binding.actions[0].operation == Operation::folder ||
-        hotkey.binding.actions[0].operation == Operation::pan) return false;
+        hotkey.binding.actions[0].operation == Operation::pan ||
+        hotkey.binding.actions[0].operation == Operation::continuous_media) return false;
     hotkeys.push_back(std::move(hotkey));
     return true;
 }
@@ -530,7 +543,7 @@ bool parse_mappings(std::istream& file, Mappings& mappings) {
             }
         }
     }
-    return !file.bad();
+    return !file.bad() && valid_media_bindings(bindings);
 }
 
 bool read_mapping_snapshot(const wchar_t* path,std::string& bytes) {
@@ -846,6 +859,29 @@ void fire(logi::Mouse& mouse,const Control& control,Gesture gesture,Sequences& s
     if(const auto* binding=control.captured[static_cast<std::size_t>(gesture)])sequences.start(*binding,mouse,control.owner);
 }
 
+bool valid_media_bindings(const std::vector<Binding>& bindings) {
+    constexpr WORD expected[]{VK_MEDIA_PREV_TRACK,VK_MEDIA_NEXT_TRACK,VK_VOLUME_UP,VK_VOLUME_DOWN};
+    for(const auto& marker:bindings) {
+        if(marker.actions.front().operation!=Operation::continuous_media)continue;
+        // Validate effective app rules, including inherited markers and basename
+        // profiles, so changing a direction cannot silently change media semantics.
+        for(const auto& context:bindings) {
+            const auto* tap=lookup(bindings,marker.control,Gesture::tap,context.application);
+            if(!tap || tap->actions.front().operation!=Operation::continuous_media)continue;
+            for(unsigned i=0;i<4;++i) {
+                const auto* direction=lookup(bindings,marker.control,static_cast<Gesture>(i+1),context.application);
+                const std::array<WORD,5> keys{expected[i]};
+                if(!direction || direction->actions.size()!=1 ||
+                   direction->actions[0].operation!=Operation::keys || direction->actions[0].keys!=keys) {
+                    std::fputs("GestureMedia requires PreviousTrack/NextTrack/VolumeUp/VolumeDown directions.\n",stderr);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool divert_wheel(logi::Mouse& mouse, std::optional<Wheel>& wheel, unsigned speed) {
     const auto info = mouse.request(mouse.thumb, 0);
     const auto state = mouse.request(mouse.thumb, 1);
@@ -869,7 +905,8 @@ bool divert_wheel(logi::Mouse& mouse, std::optional<Wheel>& wheel, unsigned spee
 
 bool needs_raw_motion(const Binding& binding) {
     if (binding.control==thumb_wheel) return false;
-    if (binding.actions.front().operation==Operation::pan) return true;
+    if (binding.actions.front().operation==Operation::pan ||
+        binding.actions.front().operation==Operation::continuous_media) return true;
     if (binding.gesture==Gesture::tap) return false;
     // Explicit None directions suppress inherited actions without requiring XY reports.
     return std::ranges::any_of(binding.actions,[](const Action& action) {
@@ -1684,10 +1721,16 @@ void events(logi::Mouse& mouse, std::vector<Control>& controls, std::optional<Wh
                         control.captured[i]=lookup(bindings,control.id,static_cast<Gesture>(i),control.owner.application);
                     const auto* tap = control.captured[static_cast<std::size_t>(Gesture::tap)];
                     control.panning = tap && tap->actions.front().operation == Operation::pan;
+                    control.continuous_media=tap && tap->actions.front().operation==Operation::continuous_media;
+                    control.media.reset();
                     if (!control.xy && tap) sequences.start(*tap, mouse,control.owner);
                 }
                 if (!down && control.down && control.session.end()) {
                     if(control.panning)release_pan(control);
+                    else if(control.continuous_media) {
+                        if(!control.media.engaged())fire(mouse,control,Gesture::tap,sequences);
+                        control.media.reset();control.continuous_media=false;
+                    }
                     else if(control.xy) {
                         auto gesture = Gesture::tap;
                         if (std::max(std::abs(control.x), std::abs(control.y)) >= control.threshold) {
@@ -1715,6 +1758,9 @@ void events(logi::Mouse& mouse, std::vector<Control>& controls, std::optional<Wh
                 const auto y = static_cast<std::int16_t>(logi::word(data.subspan(2)));
                 if (control.panning) {
                     move_pan(control, x, y, control.counts_per_pan_step);
+                } else if(control.continuous_media) {
+                    if(const auto direction=control.media.move(x,y,GetTickCount64(),control.threshold,control.threshold))
+                        fire(mouse,control,static_cast<Gesture>(*direction),sequences);
                 } else {
                     control.x = std::clamp(control.x + x, -100000, 100000);
                     control.y = std::clamp(control.y + y, -100000, 100000);

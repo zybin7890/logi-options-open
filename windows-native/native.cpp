@@ -126,6 +126,7 @@ struct GesturePreset { const wchar_t* title; std::array<const wchar_t*,5> rules;
 constexpr GesturePreset gesture_presets[] = {
     {L"虚拟桌面",{L"Win+Tab",L"Win+Ctrl+Left",L"Win+Ctrl+Right",L"Win",L"Win+D"}},
     {L"媒体控制",{L"PlayPause",L"PreviousTrack",L"NextTrack",L"VolumeUp",L"VolumeDown"}},
+    {L"媒体控制（连续）",{L"GestureMedia",L"PreviousTrack",L"NextTrack",L"VolumeUp",L"VolumeDown"}},
     {L"窗口管理",{L"Alt+Tab",L"Win+Left",L"Win+Right",L"Maximize",L"Win+D"}},
     {L"应用程序导航",{L"Alt+Tab",L"Alt+Shift+Tab",L"Alt+Tab",L"Win",L"Win+D"}},
     {L"缩放（无旋转）",{L"None",L"None",L"None",L"ZoomIn",L"ZoomOut"}},
@@ -623,6 +624,18 @@ void flush_binding_edit(App& app) {
     app.pending_binding.reset();
     if (!edit.changes.empty()) save(app,change_section(app.source,edit.section,edit.changes));
 }
+void normalize_media_edit(const App& app,const Text& key,Section& changes) {
+    const auto value=[&](const Text& item) {
+        const auto found=changes.find(item);
+        return found!=changes.end()?found->second:get(app,item);
+    };
+    if(value(key)!=L"GestureMedia")return;
+    constexpr const wchar_t* expected[]{L"PreviousTrack",L"NextTrack",L"VolumeUp",L"VolumeDown"};
+    for(unsigned i=0;i<4;++i)if(value(key+gesture_suffix[i+1])!=expected[i]) {
+        changes[key]=L"PlayPause"; // Direction customization returns to ordinary gestures.
+        return;
+    }
+}
 void queue_binding_edit(App& app) {
     if (app.pane_index<0 || static_cast<std::size_t>(app.pane_index)>=std::size(button_points)) return;
     BindingEdit edit{app.selected,{}};
@@ -635,10 +648,12 @@ void queue_binding_edit(App& app) {
         const auto value=control_text(app.gesture[i]);
         if (value!=get(app,item)) edit.changes[item]=value;
     }
+    normalize_media_edit(app,key,edit.changes);
     app.pending_binding=std::move(edit);
     SetTimer(app.window,5,180,nullptr);
 }
 Text action_name(const Text& code) {
+    if (code==L"GestureMedia") return L"播放 / 暂停";
     if (code==L"Pan") return L"中键（按住移动以平移）";
     if (code==L"Win+Left") return L"窗口靠左";
     if (code==L"Win+Right") return L"窗口靠右";
@@ -1843,6 +1858,7 @@ void save_binding(App& app,bool inherit,bool redraw=true,bool update_only=false)
             if (inherit || value!=get(app,item)) changes[item]=inherit?L"":value;
         }
     }
+    normalize_media_edit(app,key,changes);
     if (changes.empty()) return;
     if (save(app,change_section(app.source,app.selected,changes)) && redraw) {
         if (!update_only || app.animating) render(app);
@@ -1928,6 +1944,7 @@ void select_action(App& app) {
             changes[key+gesture_suffix[app.gesture_direction]]=action.code;
             if (app.gesture_direction!=0 && get(app,key)==L"Pan") changes[key]=L"MouseMiddle";
         }
+        normalize_media_edit(app,key,changes);
         if (!changes.empty() && !save(app,change_section(app.source,app.selected,changes))) return;
         app.choosing_preset=false; app.gesture_direction=-1;
         render(app);

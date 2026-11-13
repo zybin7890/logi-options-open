@@ -1,6 +1,6 @@
 # Logi Options Open
 
-> **当前优先 Windows 原生版开发。** 最新旧版 Win32 界面及后台候选见 [windows-native](windows-native/README.md)，其中包含独立构建入口和 35 项离线手势测试。候选尚未通过完整实体鼠标及重启验收，不作为稳定发行版；下文的共享 Qt / Linux 版本保留，本轮没有更新。
+> **当前优先 Windows 原生版开发。** 最新旧版 Win32 界面及后台候选见 [windows-native](windows-native/README.md)，其中包含独立构建入口、连续媒体手势和 66 项离线手势测试。候选尚未通过完整实体鼠标及重启验收，不作为稳定发行版；下文的共享 Qt / Linux 版本保留，本轮没有更新。
 
 **独立第三方、实验性、尚不成熟。与 Logitech / 罗技无隶属关系，未获其认可或支持。**
 
