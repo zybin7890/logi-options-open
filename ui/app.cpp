@@ -1003,6 +1003,7 @@ private:
             const auto document = QJsonDocument::fromJson(output.toUtf8(), &parse);
             if (ok && parse.error == QJsonParseError::NoError && document.isObject()) applyStatus(document.object());
             else {
+                  confirmedSettings_ = {};
                 device_->setText(QStringLiteral("Device unavailable"));
                 thumbInvertSupported_ = false;
                 dpi_->setEnabled(false); slider_->setEnabled(false); smartShift_->setEnabled(false);
@@ -1037,7 +1038,7 @@ private:
             [this, setting](bool ok, const QString&, const QString& error) {
                 message(ok ? QStringLiteral("已应用并核对设备设置。") : error, !ok);
                 if(ok)updatePointerSummary();
-                if (!ok) refreshAll();
+                refreshAll();
             }});
     }
 

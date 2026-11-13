@@ -730,7 +730,7 @@ Text dpi_result_notice(const DpiCommandResult& result) {
     return message+L"。";
 }
 unsigned long long setting_group_revision(const std::array<unsigned long long,6>& revisions,unsigned id) {
-    return id<=2?std::max(revisions[1],revisions[2]):revisions[id];
+    return id<=2?std::max(revisions[1],revisions[2]):id<=4?std::max(revisions[3],revisions[4]):revisions[id];
 }
 std::optional<unsigned> shown_setting(const App& app,unsigned id) {
     return app.setting_unconfirmed[id] && app.desired_setting[id]?app.desired_setting[id]:app.device.values[id];
@@ -760,7 +760,7 @@ bool finish_settings(App& app) {
     bool any{},visible{};
     unsigned long long last_revision{};
     app.setting_last_notice.clear();
-    for (const unsigned group:{1u,3u,4u,5u}) {
+    for (const unsigned group:{1u,3u,5u}) {
         const auto last=app.work_setting_last[group];
         if (!last) continue;
         any=true;
@@ -770,7 +770,7 @@ bool finish_settings(App& app) {
             app.io_setting_values[id]==result.requested;
         const bool current=valid && result.applied && (result.observed_mask&(1u<<(id-1))) &&
             result.observed[id-1]==result.requested && is_current_setting_result(result);
-        const unsigned affected=group==1?3u:1u<<(group-1);
+        const unsigned affected=group==1?3u:group==3?12u:16u;
         for (unsigned bit=0;bit<5;++bit) if (affected&(1u<<bit)) {
             app.next_device.values[bit+1]=current && (result.observed_mask&(1u<<bit))?
                 std::optional{result.observed[bit]}:std::nullopt;
@@ -787,7 +787,7 @@ bool finish_settings(App& app) {
             Text field_message;
             if (own) field_message=own_valid?setting_result_notice(*own,matched && own->applied):L"设置回执不匹配，尚未确认生效。";
             else if (expected && !matched)
-                field_message=(field==1?L"SmartShift":L"滚轮模式")+Text(L"期望值尚未确认，请核对当前设置。");
+                field_message=Text(field==1?L"SmartShift":field==2?L"滚轮模式":field==3?L"高分辨率":L"滚动方向")+L"期望值尚未确认，请核对当前设置。";
             app.setting_failure_notice[field]=app.setting_unconfirmed[field]?field_message:Text{};
             if (!field_message.empty() && app.io_setting_revision[field]>=last_revision) {
                 last_revision=app.io_setting_revision[field];
@@ -872,7 +872,7 @@ void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes = {}, unsign
             const auto result=set_agent_setting(static_cast<SettingKey>(id-1),value,
                 app.io_setting_revision[id],4000,app.mapping().c_str());
             app.work_settings[id]=result;
-            app.work_setting_last[id<=2?1:id]=id;
+            app.work_setting_last[id<=2?1:id<=4?3:id]=id;
             for (unsigned bit=0;bit<5;++bit)
                 if (result.observed_mask&(1u<<bit)) base.values[bit+1]=result.observed[bit];
             item=changes.erase(item);

@@ -473,9 +473,12 @@ int run_with(const std::filesystem::path& config_file,DeviceBackend& device,Inpu
 int run(const std::filesystem::path& config){auto input=make_uinput_sink();HidDevice device;DesktopHooks hooks(*input);return run_with(config,device,*input,hooks);}
 std::string dispatch(const std::string& command){
     if(running())return transact(command);
-    // Same exclusive lock closes the check/start race with a newly started daemon.
-    auto lock=acquire_lock();
+    // A status probe does not access HID and need not take device ownership.
+    // The daemon may acquire its lock immediately after running() returned false.
     if(command=="agent-status"||command=="agent-json")return "{\"native\":false,\"ready\":false,\"connected\":false,\"options_plus\":false}";
+    // Same exclusive lock closes the check/start race with a newly started daemon.
+    Fd lock;
+    try{lock=acquire_lock();}catch(...){if(running())return transact(command);throw;}
     if(command=="stop")return "{\"stopped\":true}";
     if(command.starts_with("reload "))throw std::runtime_error("Linux daemon is not running");
     stopped=false;signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);HidDevice device;
