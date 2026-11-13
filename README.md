@@ -72,6 +72,12 @@ Linux 默认用户配置：`$XDG_CONFIG_HOME/logi-options-open/mappings.ini`，�
 
 Linux 需要读写对应的 Logitech hidraw 设备及 `/dev/uinput`。参考 [Linux 说明](linux/README.md) 的设备权限和功能边界；不要用 `chmod 666` 开放所有输入设备。程序不自动提权，不自动终止其他鼠标软件。
 
+## 导入与导出配置
+
+在“设置”页选择“导出配置”或“导入配置”。Windows 原生候选与共享 Qt 界面使用同一种 INI 备份：保留全部按键、应用配置、手势、Smart Actions 和动作环，以及界面已读取的 DPI、SmartShift、滚轮模式、方向和高分辨率参数。备份中的参数写在注释头内，普通旧 INI 也可导入。
+
+导入先校验格式和动作；失败不覆盖现有配置。含设备参数的备份需连接鼠标并运行后台，导入后立即请求应用，并区分保存、后台确认和设备参数失败。备份中的应用路径、快捷键与动作不会被静默转换；跨平台不支持的动作由目标平台校验器拒绝。备份可能包含个人宏文本和路径，请自行选择是否分享。
+
 ## 本地 HTTP API 与 MCP
 
 Python 3.10+ 标准库，无需 pip 运行依赖。Linux 的 bridge 从同目录或 PATH 查找 `logi-cli`；也可以设置 `LOGI_OPTIONS_OPEN_CLI`。从源码树启动时可先设置该变量指向 `build/logi-cli`。

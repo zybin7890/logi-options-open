@@ -2,6 +2,7 @@
 #include "remap.hpp"
 #include "smart_native.hpp"
 #include "../first_run.hpp"
+#include "../configuration_backup.hpp"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -51,6 +52,7 @@ enum Id {
     delete_profile, ring_folder, gesture_preset, apply_thumb_speed,
     minimize_ui, close_ui, more_actions, custom_actions, ring_library, ring_search, ring_custom,
     ring_all, ring_undo, ring_redo, ring_commit, gesture_presets_open, gesture_overview, profiles_previous, profiles_next,
+    export_config, import_config,
     nav_first = 100, profiles_first = 200, pins_first = 400, hosts_first = 500, rings_first = 600,
     gesture_rows_first = 700,
 };
@@ -1662,6 +1664,51 @@ void flush_ring_edit(App& app) {
     }
 }
 void flush_editor_edits(App& app) { flush_binding_edit(app);flush_ring_edit(app); }
+void transfer_config(App& app,bool importing) {
+    flush_editor_edits(app);
+    if(app.busy||!app.pending_values.empty()||app.pending_reload||app.reload_busy) {
+        notice(app,L"请等待当前设置保存完成后再导入或导出。");return;
+    }
+    wchar_t path[4096]{};
+    if(!importing)wcscpy_s(path,L"LogiOptionsOpen-backup.ini");
+    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=app.window;
+    dialog.lpstrFilter=L"配置备份 (*.ini)\0*.ini\0所有文件\0*.*\0";
+    dialog.lpstrFile=path;dialog.nMaxFile=std::size(path);dialog.lpstrDefExt=L"ini";
+    dialog.lpstrTitle=importing?L"导入配置":L"导出配置";
+    dialog.Flags=OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR|(importing?OFN_FILEMUSTEXIST:OFN_OVERWRITEPROMPT);
+    if(!(importing?GetOpenFileNameW(&dialog):GetSaveFileNameW(&dialog)))return;
+    try {
+        if(!importing){
+            if(_wcsicmp(fs::absolute(path).lexically_normal().c_str(),fs::absolute(app.mapping()).lexically_normal().c_str())==0)
+                throw std::runtime_error("Choose a backup path different from the active configuration");
+            loo_backup::Configuration backup{to_utf8(read(app.mapping()))};
+            for(unsigned index=0;index<6;++index)backup.settings[index]=app.device.values[index];
+            const auto bytes=loo_backup::encode(backup);
+            wchar_t temporary[MAX_PATH]{};
+            if(!GetTempFileNameW(fs::path(path).parent_path().c_str(),L"LOB",0,temporary))throw std::runtime_error("Cannot create backup file");
+            std::ofstream output(fs::path(temporary),std::ios::binary);output.write(bytes.data(),bytes.size());output.close();
+            if(!output||!MoveFileExW(temporary,path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){
+                DeleteFileW(temporary);throw std::runtime_error("Cannot write backup file");
+            }
+            notice(app,L"配置已导出，包含全部映射及已读取的 DPI / 滚轮参数。");return;
+        }
+        std::ifstream input(fs::path(path),std::ios::binary);
+        if(!input)throw std::runtime_error("Cannot read backup file");
+        const std::string bytes{std::istreambuf_iterator<char>(input),{}};
+        const auto backup=loo_backup::decode(bytes);
+        const bool has_settings=std::ranges::any_of(backup.settings,[](const auto& value){return value.has_value();});
+        if(has_settings&&(!agent_running()||options_running()||!app.device.values[0])) {
+            notice(app,L"备份含设备参数，请先连接鼠标并启动本地后台；当前配置未修改。");return;
+        }
+        if(backup.settings[0]&&std::ranges::find(app.device.dpi,*backup.settings[0])==app.device.dpi.end()) {
+            notice(app,L"备份的 DPI 不受当前鼠标支持；当前配置未修改。");return;
+        }
+        if(!save(app,from_utf8(backup.mappings)))return;
+        for(unsigned index=0;index<6;++index)if(backup.settings[index])queue_parameter(app,index,*backup.settings[index],true);
+        flush_parameters(app);
+        if(!has_settings)notice(app,L"配置已导入；后台应用结果见重载状态。");
+    }catch(const std::exception& error){notice(app,L"配置操作失败："+from_utf8(error.what()));}
+}
 void render(App& app) {
     flush_editor_edits(app);
     app.rendering=true;
@@ -1797,6 +1844,8 @@ void render(App& app) {
         button(app,app.native?L"停止试用":L"开始试用",app.native?end:begin,1038,410,136,42,true);
         styled_button(app,L"刷新设备",reload,663,536,106,40,{Look::plain,false,{},{},{}});
         styled_button(app,L"高级配置",advanced,787,536,106,40,{Look::plain,false,{},{},{}});
+        styled_button(app,L"导出配置",export_config,663,598,106,40,{Look::plain,false,{},{},{}});
+        styled_button(app,L"导入配置",import_config,787,598,106,40,{Look::plain,false,{},{},{}});
     } else if (app.page==ring) render_ring(app);
     if (app.device.battery && app.page!=ring) {
         const auto battery=std::to_wstring(*app.device.battery)+L"%";
@@ -2038,6 +2087,8 @@ void click(App& app,int id) {
     case new_profile: add_profile(app); break;
     case reload: update_agents(app); io(app); break;
     case begin: start_agent(app); break;
+    case export_config: transfer_config(app,false); break;
+    case import_config: transfer_config(app,true); break;
     case end:
         if (stop_agent()==0) {
             app.waiting_agent=false; app.waiting_stop=true; app.timer_checks=0;

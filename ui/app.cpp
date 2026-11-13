@@ -1,4 +1,5 @@
 #include "../first_run.hpp"
+#include "../configuration_backup.hpp"
 #include "ring_ui.hpp"
 #include "device_canvas.hpp"
 #include "platform.hpp"
@@ -10,6 +11,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QFileIconProvider>
 #include <QFontDatabase>
 #include <QFormLayout>
@@ -271,6 +273,18 @@ public:
         auto* controls=new QHBoxLayout;start_=new QPushButton(QStringLiteral("启动后台"));stop_=new QPushButton(QStringLiteral("停止后台"));
         controls->addWidget(start_);controls->addWidget(stop_);controls->addStretch();settingsLayout->addLayout(controls);
         auto* advanced=new QPushButton(QStringLiteral("高级配置"));settingsLayout->addWidget(advanced);settingsLayout->addStretch();
+        auto* transfers=new QHBoxLayout;
+        auto* exportConfig=new QPushButton(QStringLiteral("导出配置"));exportConfig->setObjectName("exportConfiguration");
+        auto* importConfig=new QPushButton(QStringLiteral("导入配置"));importConfig->setObjectName("importConfiguration");
+        transfers->addWidget(exportConfig);transfers->addWidget(importConfig);transfers->addStretch();settingsLayout->addLayout(transfers);
+        connect(exportConfig,&QPushButton::clicked,this,[this]{
+            const auto path=QFileDialog::getSaveFileName(this,QStringLiteral("导出配置"),QStringLiteral("LogiOptionsOpen-backup.ini"),QStringLiteral("配置备份 (*.ini)"));
+            if(!path.isEmpty())exportConfiguration(path);
+        });
+        connect(importConfig,&QPushButton::clicked,this,[this]{
+            const auto path=QFileDialog::getOpenFileName(this,QStringLiteral("导入配置"),{},QStringLiteral("配置备份 (*.ini);;所有文件 (*)"));
+            if(!path.isEmpty())importConfiguration(path);
+        });
         tabs->addTab(settings,QStringLiteral("设置"));
         auto* homePage=new QWidget;auto* homeLayout=new QVBoxLayout(homePage);homeLayout->addStretch();
         auto* deviceCard=new QToolButton;deviceCard->setObjectName("openDevice");deviceCard->setText(QStringLiteral("MX Master 3S"));
@@ -408,6 +422,7 @@ public:
 
     void applyStatus(const QJsonObject& object) {
         loading_ = true;
+        confirmedSettings_=object.value(QStringLiteral("settings")).toObject();
         device_->setText(object.value(QStringLiteral("device")).toString(QStringLiteral("HID++ mouse"))
             + QStringLiteral("  ·  Battery ")
             + (object.value(QStringLiteral("battery")).isDouble()
@@ -450,6 +465,57 @@ public:
             !checks_.value(QStringLiteral("thumb-invert"))->isEnabled();
     }
 
+    bool exportConfiguration(const QString& path) {
+        if(active_||!tasks_.empty()||saveTimer_.isActive()) {message(QStringLiteral("请等待当前设置保存完成。"),true);return false;}
+        if(QFileInfo(path).absoluteFilePath()==QFileInfo(config_).absoluteFilePath()) {message(QStringLiteral("请选择与当前配置不同的备份路径。"),true);return false;}
+        try {
+            const auto bytes=readFile(config_).toUtf8();
+            loo_backup::Configuration backup{std::string(bytes.constData(),bytes.size())};
+            for(unsigned i=0;i<loo_backup::names.size();++i){
+                const auto key=QString::fromLatin1(loo_backup::names[i].data(),loo_backup::names[i].size());
+                if(confirmedSettings_.value(key).isDouble())backup.settings[i]=confirmedSettings_.value(key).toInt();
+            }
+            const auto output=loo_backup::encode(backup);
+            if(!writeFile(path,QByteArray(output.data(),output.size())))throw std::runtime_error("Cannot write backup");
+            message(QStringLiteral("已导出全部映射及已读取的 DPI / 滚轮参数。"));return true;
+        }catch(const std::exception& error){message(QString::fromUtf8(error.what()),true);return false;}
+    }
+
+    void importConfiguration(const QString& path) {
+        if(active_||!tasks_.empty()||saveTimer_.isActive()) {message(QStringLiteral("请等待当前设置保存完成。"),true);return;}
+        try {
+            QFile file(path);if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("Cannot read backup");
+            const auto bytes=file.read(131073);
+            auto backup=std::make_shared<loo_backup::Configuration>(loo_backup::decode(std::string_view(bytes.constData(),bytes.size())));
+            const bool hasSettings=std::any_of(backup->settings.begin(),backup->settings.end(),[](auto value){return value.has_value();});
+            if(hasSettings&&(!backendRunning_||!confirmedSettings_.value("dpi").isDouble()))throw std::runtime_error("Connect the mouse and start its backend before importing device settings");
+            if(backup->settings[0]&&!dpiChoices_.contains(*backup->settings[0]))throw std::runtime_error("Backup DPI is unsupported by this mouse");
+            auto candidate=std::make_shared<QTemporaryFile>(QFileInfo(config_).absolutePath()+QStringLiteral("/.import-XXXXXX.ini"));
+            if(!candidate->open()||candidate->write(backup->mappings.data(),backup->mappings.size())!=static_cast<qint64>(backup->mappings.size())||!candidate->flush())throw std::runtime_error("Cannot validate backup file");
+            const auto temporary=candidate->fileName();candidate->close();
+            const auto previous=readFile(config_);const auto revision=revision_;
+            centralWidget()->setEnabled(false);
+            submit({QStringLiteral("import-validate"),{QStringLiteral("check-config"),temporary},
+                [this,backup,candidate,previous,revision](bool ok,const QString&,const QString& error){
+                    centralWidget()->setEnabled(true);
+                    if(!ok){message(QStringLiteral("导入失败，当前配置未修改：")+error,true);return;}
+                    if(revision!=revision_||readFile(config_)!=previous){message(QStringLiteral("配置已更改，导入已取消。"),true);return;}
+                    const auto& bytes=backup->mappings;
+                    if(!writeFile(config_,QByteArray(bytes.data(),bytes.size()))){message(QStringLiteral("无法保存导入配置。"),true);return;}
+                    ++revision_;draft_=QString::fromUtf8(bytes.data(),bytes.size());
+                    {QSignalBlocker block(profile_);profile_->clear();profile_->addItem(QStringLiteral("全局设置"),QStringLiteral("global"));}
+                    setEditors(draft_);rebuildProfiles();
+                    if(!backendRunning_){message(QStringLiteral("配置已导入；启动后台后应用。"));return;}
+                    submit({QStringLiteral("import-reload"),{QStringLiteral("reload"),config_},
+                        [this,backup](bool okay,const QString& output,const QString& failure){
+                            const auto outcome=loo_ui::platform::reloadResult(okay,QJsonDocument::fromJson(output.toUtf8()).object());
+                            if(outcome!=loo_ui::platform::ReloadResult::Applied){message(QStringLiteral("配置已保存，但后台尚未确认应用：")+failure,true);return;}
+                            applyImportedSettings(backup,0,{});
+                        }});
+                }});
+        }catch(const std::exception& error){message(QStringLiteral("导入失败，当前配置未修改：")+QString::fromUtf8(error.what()),true);}
+    }
+
 protected:
     bool eventFilter(QObject* watched,QEvent* event) override {
         if(watched->objectName()=="titleBar" || watched->objectName()=="pageHeader") {
@@ -464,6 +530,19 @@ protected:
         return QMainWindow::eventFilter(watched,event);
     }
 private:
+    void applyImportedSettings(std::shared_ptr<loo_backup::Configuration> backup,unsigned index,QStringList failures){
+        while(index<backup->settings.size()&&!backup->settings[index])++index;
+        if(index==backup->settings.size()){
+            message(failures.isEmpty()?QStringLiteral("配置已导入，后台已确认应用。"):QStringLiteral("映射已导入，以下设备参数失败：")+failures.join(QStringLiteral("；")),!failures.isEmpty());
+            refreshAll();return;
+        }
+        const auto key=QString::fromLatin1(loo_backup::names[index].data(),loo_backup::names[index].size());
+        submit({QStringLiteral("import-setting"),{QStringLiteral("set"),key,QString::number(*backup->settings[index])},
+            [this,backup,index,key,failures](bool ok,const QString&,const QString& error)mutable{
+                if(!ok)failures.push_back(key+": "+error);
+                applyImportedSettings(backup,index+1,std::move(failures));
+            }});
+    }
     void updatePointerSummary(){
         pointerCanvas_->setLabels({QStringLiteral("SmartShift: %1\n滚动方向：%2")
             .arg(smartShift_->value()?QStringLiteral("开启"):QStringLiteral("关闭"))
@@ -1022,6 +1101,7 @@ private:
     }
 
     QString config_, cli_, draft_;
+    QJsonObject confirmedSettings_;
     bool runtime_ = true, loading_ = false, timedOut_ = false;
     bool backendRunning_ = false, thumbInvertSupported_ = false;
     unsigned revision_ = 0;
@@ -1115,6 +1195,25 @@ int interactionTests() {
         return condition();
     };
     auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("pages"));
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("nav7")),Qt::LeftButton);
+    if(!window.findChild<QPushButton*>(QStringLiteral("exportConfiguration"))->isVisible() ||
+       !window.findChild<QPushButton*>(QStringLiteral("importConfiguration"))->isVisible())return 50;
+    const auto backupPath=directory.filePath(QStringLiteral("backup.ini"));
+    if(!window.exportConfiguration(backupPath))return 51;
+    const auto backup=loo_backup::decode(readFile(backupPath).toUtf8().toStdString());
+    if(backup.mappings!=initial.toUtf8().toStdString())return 52;
+    const auto imported=initial+QStringLiteral("\n[import-test]\n0053=Ctrl+C\n");
+    if(!writeFile(backupPath,QByteArray::fromStdString(loo_backup::encode({imported.toUtf8().toStdString()}))))return 53;
+    window.importConfiguration(backupPath);
+    if(!await([&]{return readFile(path)==imported;}))return 54;
+    if(!writeFile(backupPath,"# Logi Options Open backup v2\n[global]\n0053=None\n"))return 55;
+    window.importConfiguration(backupPath);
+    if(readFile(path)!=imported)return 56;
+    if(!writeFile(backupPath,"[global]\n0053=UnsupportedAction\n"))return 57;
+    window.importConfiguration(backupPath);
+    if(!await([&]{return window.centralWidget()->isEnabled();}) || readFile(path)!=imported)return 58;
+    if(!screenshot(window,QStringLiteral("linux-config-transfer.png")))return 59;
+    QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("nav1")),Qt::LeftButton);
     QTest::mouseClick(window.findChild<QPushButton*>(QStringLiteral("openAddProfile")),Qt::LeftButton);
     auto* profileName = window.findChild<QLineEdit*>(QStringLiteral("profileName"));
     QTest::mouseClick(profileName, Qt::LeftButton); QTest::keyClicks(profileName, "firefox");
