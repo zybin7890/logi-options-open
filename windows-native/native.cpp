@@ -1527,10 +1527,25 @@ void start_agent(App& app) {
         notice(app,L"正在接管鼠标…");app.startup_notice_revision=app.notice_revision;
     };
     if(app.native) {
-        const auto status=read_agent_status();
-        if(status.available && !status.mappings_ready)
-            if(const auto process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,status.pid))monitor(process);
-        return;
+        if (!options_running()) {
+            const auto status=read_agent_status();
+            if(status.available && !status.mappings_ready)
+                if(const auto process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,status.pid))monitor(process);
+            return;
+        }
+        // Reconcile native + official dual-agent conflict by cleanly cycling to run-preview takeover.
+        const auto exe = app.directory / L"logi-cli.exe";
+        auto stop_cmd = L"\"" + exe.wstring() + L"\" stop";
+        STARTUPINFOW si{}; si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(exe.c_str(), stop_cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                           nullptr, app.directory.c_str(), &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 2500);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        update_agents(app);
+        if (app.native) return;
     }
     if (!check_mappings(app.mapping().c_str())) { notice(app,L"配置无效，请先检查按键设置。"); return; }
     const auto exe=app.directory/L"logi-cli.exe";

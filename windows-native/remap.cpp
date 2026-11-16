@@ -1171,8 +1171,11 @@ bool execute(const Action& action, logi::Mouse* device, InputContext* resulting_
         if (mouse != VK_MBUTTON)
             events[0].mi.mouseData = events[1].mi.mouseData = mouse == VK_XBUTTON1 ? XBUTTON1 : XBUTTON2;
         const auto accepted = balanced_input(std::span{events}.first(2));
-        if (!accepted)
-            std::fputs("Windows rejected mouse input.\n", stderr);
+        if (!accepted) {
+            const auto err = GetLastError();
+            std::fprintf(stderr, "Windows rejected mouse input (err=%lu fg=%ls).\n",
+                         err, Foreground{}.get().c_str());
+        }
         return accepted;
     }
     unsigned count = 0;
@@ -1194,8 +1197,11 @@ bool execute(const Action& action, logi::Mouse* device, InputContext* resulting_
         event.ki.dwFlags = KEYEVENTF_KEYUP | (extended(event.ki.wVk) ? KEYEVENTF_EXTENDEDKEY : 0);
     }
     const auto accepted = balanced_input(std::span{events}.first(count*2));
-    if (!accepted)
-        std::fputs("Windows rejected some shortcut input.\n", stderr);
+    if (!accepted) {
+        const auto err = GetLastError();
+        std::fprintf(stderr, "Windows rejected some shortcut input (err=%lu fg=%ls).\n",
+                     err, Foreground{}.get().c_str());
+    }
     return accepted;
 }
 
