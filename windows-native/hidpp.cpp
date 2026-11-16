@@ -31,6 +31,15 @@ std::vector<Interface> enumerate() {
         if (!SetupDiGetDeviceInterfaceDetailW(devices, &entry, detail, size, nullptr, nullptr))
             continue;
 
+        bool maybe_logitech = false;
+        for (const wchar_t* p = detail->DevicePath; p[0] && p[1] && p[2] && p[3]; ++p) {
+            if (p[0] == L'0' && p[1] == L'4' && p[2] == L'6' && (p[3] == L'd' || p[3] == L'D')) {
+                maybe_logitech = true;
+                break;
+            }
+        }
+        if (!maybe_logitech) continue;
+
         const auto handle = CreateFileW(detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                         nullptr, OPEN_EXISTING, 0, nullptr);
         if (handle == INVALID_HANDLE_VALUE) continue;

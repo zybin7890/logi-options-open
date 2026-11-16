@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <initializer_list>
 #include <optional>
 #include <span>
@@ -118,7 +119,43 @@ struct Device {
     Byte major;
     Byte minor;
     std::string name;
+    std::wstring serial{};
+    std::wstring firmware{};
+    std::wstring receiver_firmware{};
 };
+
+inline std::optional<std::wstring> parse_fw_version_0003(std::span<const Byte> data) {
+    if (data.size() < 8) return std::nullopt;
+    std::wstring prefix;
+    for (std::size_t i = 1; i <= 3; ++i)
+        if (data[i] >= 32 && data[i] < 127) prefix.push_back(static_cast<wchar_t>(data[i]));
+    const unsigned major = (data[4] >> 4) * 10 + (data[4] & 0x0F);
+    const unsigned minor = (data[5] >> 4) * 10 + (data[5] & 0x0F);
+    const unsigned build = ((static_cast<unsigned>(data[6]) >> 4) * 1000) +
+                           ((data[6] & 0x0F) * 100) +
+                           ((static_cast<unsigned>(data[7]) >> 4) * 10) +
+                           (data[7] & 0x0F);
+    wchar_t buf[64]{};
+    if (!prefix.empty()) {
+        std::swprintf(buf, std::size(buf), L"%ls %02u.%02u.B%04u", prefix.c_str(), major, minor, build);
+    } else {
+        std::swprintf(buf, std::size(buf), L"%u.%u.%u",
+                      static_cast<unsigned>(data[4]), static_cast<unsigned>(data[5]),
+                      (static_cast<unsigned>(data[6]) << 8) | data[7]);
+    }
+    return std::wstring(buf);
+}
+
+inline std::optional<std::wstring> parse_serial_unit_id_0003(std::span<const Byte> data) {
+    if (data.size() < 5) return std::nullopt;
+    std::wstring serial;
+    for (std::size_t i = 1; i <= 4; ++i) {
+        wchar_t out[3]{};
+        std::swprintf(out, std::size(out), L"%02X", data[i]);
+        serial += out;
+    }
+    return serial == L"00000000" ? std::nullopt : std::optional<std::wstring>(serial);
+}
 
 std::optional<Device> probe(Channel& channel, Byte slot);
 Byte feature(Channel& channel, Byte slot, unsigned id);

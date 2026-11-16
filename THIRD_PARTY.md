@@ -9,7 +9,8 @@ owners' trademarks. The project name does not indicate official status.
 ## Project code and artwork
 
 The project-authored source and generated schematic artwork in this repository
-are provided under the root MIT license. `tools/generate-assets.py` reproduces
+are provided under the root GNU Affero General Public License v3.0
+(`AGPL-3.0-or-later`, see [LICENSE](LICENSE)). `tools/generate-assets.py` reproduces
 the PNG and ICO assets using only the Python standard library. It reads no
 external photographs, fonts or logos. The mouse is an original schematic,
 not an official product render. Its pin locations illustrate available controls.
@@ -32,8 +33,10 @@ at runtime; these are not redistributed as project assets.
   <https://gitlab.freedesktop.org/xorg/lib/libx11> and
   <https://gitlab.freedesktop.org/xorg/lib/libxtst>.
 - Windows builds link Windows SDK system libraries, including HID, SetupAPI,
-  GDI+ and the native controls API. These are supplied by Windows, not relicensed
-  under this project's MIT license.
+  GDI+, Direct2D/DirectWrite, BCrypt, Winsock2, and the native controls API,
+  and may optionally load Windows' built-in `winsqlite3.dll` at runtime when
+  importing local configuration data. These are supplied by Windows, not
+  relicensed under this project's AGPL-3.0-or-later license.
 - The shared Windows and Linux native UI uses Qt 6 Widgets. Qt is a dependency available
   under its own commercial and open-source terms, including LGPL/GPL options.
   This repository does not vendor Qt source. Windows packages dynamically bundle
@@ -60,4 +63,4 @@ at runtime; these are not redistributed as project assets.
 Compiler runtimes and any additional libraries linked by a particular Linux
 build retain their own licenses. Consult that build's dependency list when
 redistributing binaries. System dependencies are not covered by a claim that
-all installed software is MIT-licensed.
+all installed software is AGPL-3.0-or-later-licensed.

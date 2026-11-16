@@ -1,4 +1,5 @@
 #include "mouse.hpp"
+#include "discovery_route.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -36,32 +37,54 @@ static std::vector<unsigned> read_dpi_choices(Mouse& mouse) {
     return choices;
 }
 
+static constexpr wchar_t discovery_key[] = L"Software\\LogiNative\\Discovery";
+
+static std::optional<discovery::Hint> read_route_hint() {
+    DWORD bytes{};
+    if (RegGetValueW(HKEY_CURRENT_USER, discovery_key, L"Route", RRF_RT_REG_SZ,
+                     nullptr, nullptr, &bytes) != ERROR_SUCCESS ||
+        bytes < 2 * sizeof(wchar_t) || bytes > 32768 * sizeof(wchar_t) || bytes % sizeof(wchar_t)) return {};
+    std::wstring value(bytes / sizeof(wchar_t), L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, discovery_key, L"Route", RRF_RT_REG_SZ,
+                     nullptr, value.data(), &bytes) != ERROR_SUCCESS || !bytes) return {};
+    value.resize(bytes / sizeof(wchar_t));
+    if (value.empty() || value.back() != L'\0') return {};
+    value.pop_back();
+    return discovery::decode(value);
+}
+
+static void remember_route_hint(const discovery::Hint& hint) {
+    HKEY key{};
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, discovery_key, 0, nullptr, 0, KEY_SET_VALUE,
+                       nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    const auto value = discovery::encode(hint);
+    RegSetValueExW(key, L"Route", 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                  static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+}
+
 std::optional<Mouse> connect(HANDLE stop, bool list) {
     // Discovery is a hint, never a cached device/feature result. Re-probe the
     // last successful route before waiting on empty receiver slots again.
     static std::mutex route_mutex;
-    static std::wstring route_path;
-    static Byte route_slot{};
-    for (const auto& interface : enumerate()) {
+    static bool route_loaded{};
+    static std::optional<discovery::Hint> route;
+    std::optional<discovery::Hint> hint;
+    if (!list) {
+        std::lock_guard lock(route_mutex);
+        if (!route_loaded) { route = read_route_hint(); route_loaded = true; }
+        hint = route;
+    }
+    auto interfaces = enumerate();
+    discovery::prioritize(interfaces, hint, list);
+    for (const auto& interface : interfaces) {
         auto channel = std::make_unique<Channel>(interface, stop);
         if (!channel->valid()) {
             if (list) std::printf("046d:%04x: cannot open (Win32 %lu)\n",
                                   interface.product, channel->open_error());
             continue;
         }
-        const unsigned first = interface.receiver ? 1 : 255;
-        const unsigned last = interface.receiver ? 6 : 255;
-        unsigned preferred{};
-        if (!list) {
-            std::lock_guard lock(route_mutex);
-            if (route_path == interface.path && route_slot >= first && route_slot <= last)
-                preferred = route_slot;
-        }
-        std::vector<unsigned> slots;
-        if (preferred) slots.push_back(preferred);
-        for (unsigned slot = first; slot <= last; ++slot)
-            if (slot != preferred) slots.push_back(slot);
-        for (const auto slot : slots) {
+        for (const auto slot : discovery::slots(interface, hint, list)) {
             if (stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return std::nullopt;
             auto device = probe(*channel, static_cast<Byte>(slot));
             if (!device) continue;
@@ -76,12 +99,44 @@ std::optional<Mouse> connect(HANDLE stop, bool list) {
             if (!dpi) continue;
             const auto enhanced = find(0x2111);
             const auto unified = find(0x1004);
+            if (const auto fw_feat = find(0x0003)) {
+                if (const auto info = channel->request(device->slot, fw_feat, 0); info && info.packet.data().size() >= 5) {
+                    if (const auto ser = parse_serial_unit_id_0003(info.packet.data()))
+                        device->serial = *ser;
+                    const unsigned entities = std::min<unsigned>(info.packet.data()[0], 8);
+                    for (unsigned e = 0; e < entities; ++e) {
+                        const auto fw = channel->request(device->slot, fw_feat, 1, {static_cast<Byte>(e)});
+                        if (fw && !fw.packet.data().empty() && fw.packet.data()[0] == 0) {
+                            if (const auto parsed = parse_fw_version_0003(fw.packet.data())) {
+                                device->firmware = *parsed;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (interface.receiver) {
+                if (const auto r_feat = feature(*channel, 0xFF, 0x0003)) {
+                    if (const auto r_info = channel->request(0xFF, r_feat, 0); r_info && !r_info.packet.data().empty()) {
+                        const unsigned entities = std::min<unsigned>(r_info.packet.data()[0], 8);
+                        for (unsigned e = 0; e < entities; ++e) {
+                            const auto fw = channel->request(0xFF, r_feat, 1, {static_cast<Byte>(e)});
+                            if (fw && !fw.packet.data().empty() && fw.packet.data()[0] == 0) {
+                                if (const auto parsed = parse_fw_version_0003(fw.packet.data())) {
+                                    device->receiver_firmware = *parsed;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Mouse mouse{
                 .channel = nullptr, .device = *device, .dpi = dpi,
                 .shift = enhanced ? enhanced : find(0x2110), .wheel = find(0x2121),
                 .thumb = find(0x2150), .buttons = buttons,
-                .battery = unified ? unified : find(0x1000), .host = find(0x1814),
-                .hosts_info = find(0x1815),
+                .battery = unified ? unified : find(0x1000), .host = 0,
+                .hosts_info = 0,
                 .enhanced_shift = enhanced != 0, .unified_battery = unified != 0,
                 .dpi_choices = {}
             };
@@ -89,8 +144,11 @@ std::optional<Mouse> connect(HANDLE stop, bool list) {
             mouse.dpi_choices = read_dpi_choices(mouse);
             {
                 std::lock_guard lock(route_mutex);
-                route_path = interface.path;
-                route_slot = mouse.device.slot;
+                const discovery::Hint connected{mouse.device.slot, interface.path};
+                if (route != connected) {
+                    remember_route_hint(connected);
+                    route = connected;
+                }
             }
             return mouse;
         }
@@ -98,7 +156,14 @@ std::optional<Mouse> connect(HANDLE stop, bool list) {
     return std::nullopt;
 }
 
+static void ensure_hosts(Mouse& mouse) {
+    if (!mouse.channel) return;
+    if (!mouse.host) mouse.host = feature(*mouse.channel, mouse.device.slot, 0x1814);
+    if (!mouse.hosts_info) mouse.hosts_info = feature(*mouse.channel, mouse.device.slot, 0x1815);
+}
+
 std::vector<HostSlot> hosts(Mouse& mouse) {
+    ensure_hosts(mouse);
     const auto state = mouse.request(mouse.host, 0);
     if (!state) return {};
     const auto count = state.packet.data()[0];
@@ -154,6 +219,7 @@ std::optional<unsigned> get(Mouse& mouse, std::wstring_view setting) {
         return (reply.packet.data()[1] & 1) != 0;
     }
     if (setting == L"host") {
+        ensure_hosts(mouse);
         const auto reply = mouse.request(mouse.host, 0);
         if (!reply) return std::nullopt;
         return reply.packet.data()[1] + 1;
@@ -265,12 +331,17 @@ bool restore_standard_input(Mouse& mouse) {
     const auto thumb = mouse.request(mouse.thumb, 1);
     if (!wheel || !thumb) return false;
     const auto mode = static_cast<Byte>(wheel.packet.data()[0] & ~1);
-    if (wheel.packet.data()[0] != mode && !mouse.request(mouse.wheel, 2, {mode})) return false;
-    if (thumb.packet.data()[0] && !mouse.request(mouse.thumb, 2, {0, thumb.packet.data()[1]})) return false;
-    const auto main_check = mouse.request(mouse.wheel, 1);
-    const auto thumb_check = mouse.request(mouse.thumb, 1);
-    if (!main_check || main_check.packet.data()[0] != mode || !thumb_check ||
-        thumb_check.packet.data()[0] || thumb_check.packet.data()[1] != thumb.packet.data()[1]) return false;
+    if (wheel.packet.data()[0] != mode) {
+        if (!mouse.request(mouse.wheel, 2, {mode})) return false;
+        const auto main_check = mouse.request(mouse.wheel, 1);
+        if (!main_check || main_check.packet.data()[0] != mode) return false;
+    }
+    if (thumb.packet.data()[0]) {
+        if (!mouse.request(mouse.thumb, 2, {0, thumb.packet.data()[1]})) return false;
+        const auto thumb_check = mouse.request(mouse.thumb, 1);
+        if (!thumb_check || thumb_check.packet.data()[0] ||
+            thumb_check.packet.data()[1] != thumb.packet.data()[1]) return false;
+    }
     const auto count = mouse.request(mouse.buttons, 0);
     if (!count) return false;
     for (unsigned i = 0; i < count.packet.data()[0]; ++i) {

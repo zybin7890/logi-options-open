@@ -2,10 +2,10 @@
 #include "dpi_ipc.hpp"
 
 namespace settings_ipc {
-constexpr auto memory_name=L"Local\\LogiNative.Settings.v1";
-constexpr auto done_name=L"Local\\LogiNative.Settings.Done.v1";
-constexpr auto client_name=L"Local\\LogiNative.Settings.Client.v1";
-constexpr LONG protocol=1;
+constexpr auto memory_name=L"Local\\LogiNative.Settings.v2";
+constexpr auto done_name=L"Local\\LogiNative.Settings.Done.v2";
+constexpr auto client_name=L"Local\\LogiNative.Settings.Client.v2";
+constexpr LONG protocol=2;
 enum Phase : LONG { idle,pending,processing,done };
 using dpi_ipc::Handle;
 using dpi_ipc::canonical;
@@ -26,6 +26,8 @@ struct alignas(8) Shared {
     std::array<LONG,5> observed{};
     std::array<LONG64,5> sampled_at{};
     LONG observed_mask{},software_mask{},ready{},saved{};
+    LONG wheel_mode{},wheel_mode_valid{};
+    LONG64 wheel_mode_sampled_at{};
     wchar_t mapping[1024]{};
 };
 struct Request {unsigned long long id{};SettingKey key{};unsigned value{};unsigned long long revision{};};
@@ -53,6 +55,7 @@ public:
         InterlockedExchange64(&shared_->snapshot_sequence,0);
         InterlockedExchange(&shared_->observed_mask,0);InterlockedExchange(&shared_->software_mask,0);
         InterlockedExchange(&shared_->ready,0);InterlockedExchange(&shared_->saved,0);
+        InterlockedExchange(&shared_->wheel_mode_valid,0);InterlockedExchange64(&shared_->wheel_mode_sampled_at,0);
         InterlockedExchange(&shared_->phase,idle);ResetEvent(done_.value);
         InterlockedExchange(&shared_->version,protocol);InterlockedExchange(&shared_->running,1);
     }
@@ -70,6 +73,16 @@ public:
         UnmapViewOfFile(shared_);shared_=nullptr;
     }
     bool waiting() const{return shared_&&InterlockedCompareExchange(&shared_->phase,0,0)==pending;}
+    void observe_wheel(std::optional<unsigned> mode) {
+        if(!shared_||InterlockedCompareExchange64(&shared_->instance,0,0)!=instance_)return;
+        InterlockedIncrement64(&shared_->snapshot_sequence);
+        if(mode) {
+            InterlockedExchange(&shared_->wheel_mode,static_cast<LONG>(*mode));
+            InterlockedExchange64(&shared_->wheel_mode_sampled_at,static_cast<LONG64>(GetTickCount64()));
+        }
+        InterlockedExchange(&shared_->wheel_mode_valid,mode.has_value());
+        InterlockedIncrement64(&shared_->snapshot_sequence);
+    }
     void invalidate(SettingKey key) {
         if(!shared_||InterlockedCompareExchange64(&shared_->instance,0,0)!=instance_||static_cast<unsigned>(key)>=5)return;
         auto& commit=shared_->commits[group(key)];InterlockedIncrement64(&commit.sequence);
@@ -237,6 +250,9 @@ AgentSettingsSnapshot read_agent_settings() {
     result.instance_id=static_cast<unsigned long long>(load(shared->instance));result.pid=static_cast<unsigned long>(load(shared->pid));
     result.ready=load(shared->ready)!=0;result.saved=load(shared->saved)!=0;
     result.observed_mask=static_cast<unsigned>(load(shared->observed_mask));result.software_mask=static_cast<unsigned>(load(shared->software_mask));
+    result.wheel_mode_valid=load(shared->wheel_mode_valid)!=0;
+    result.wheel_mode=static_cast<unsigned>(load(shared->wheel_mode));
+    result.wheel_mode_sampled_at_ms=static_cast<unsigned long long>(load(shared->wheel_mode_sampled_at));
     for(unsigned i=0;i<5;++i){result.observed[i]=static_cast<unsigned>(load(shared->observed[i]));result.sampled_at_ms[i]=static_cast<unsigned long long>(load(shared->sampled_at[i]));}
     if(load(shared->snapshot_sequence)!=sequence||!load(shared->running)||load(shared->instance)!=static_cast<LONG64>(result.instance_id))return {};
     Handle process(OpenProcess(SYNCHRONIZE,FALSE,result.pid));result.available=process.value&&WaitForSingleObject(process.value,0)==WAIT_TIMEOUT;

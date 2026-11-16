@@ -7,9 +7,13 @@
 ## 已包含的修改
 
 - DPI、五项滚轮设置通过后台读写和返回确认，减少 GUI 与后台争用设备；设置和映射重载带实例、请求及版本检查。
-- 手势会话在按下时捕获前台窗口、进程和方向映射；焦点变化、配置重载、设备通知丢失及停止会取消会话。
+- 指针与滚轮页面新增 DPI 快捷预设（`800 / 1600 / 3200 / 5000`）与 Windows “提高指针精确度”（`SPI_GETMOUSE` / `SPI_SETMOUSE`）开关。
+- 手势会话在按下时捕获前台窗口、进程和方向映射；焦点变化、配置重载、设备通知丢失及停止会取消会话，包含连续媒体手势。
 - 取消后等待物理释放，避免补发点击；部分输入注入失败时尝试清理本次已按下的键，保留已有物理修饰键。
-- 普通手势仍在释放时执行一次方向动作；Pan 保持连续滚动。Smart Actions、Ring、CLI 及 Python API/MCP 代码仍在项目中，支持范围不等同于原版全部功能。
+- 集成 Flow 跨屏 LAN 发现与 BCrypt HMAC-SHA256 剪贴板/边缘同步、`HID++ 0x0003` 设备序列号/固件信息、Bolt 接收器扫描/配对锁与系统蓝牙跳转、低电量/锁键/麦克风状态 OSD 通知。
+- 支持 `.lp5` / `.lp4` / `.ini` 动作环配置导入导出、界面设置叠加面板与槽位拖拽、`简体中文` / `English` 完整双语切换、深/浅/跟随系统主题，以及通过系统 `winsqlite3.dll` 只读导入本地 `LogiOptionsPlus\settings.db`。
+- 支持系统托盘图标（`--tray` 静默启动、关闭最小化到托盘、`FindWindowW` 单实例唤醒已有窗口、`TaskbarCreated` 重建及右键菜单）与设置页 `HKCU\...\Run\LogiNative` 开机自启开关（默认不自动写入开机启动）。
+- Smart Actions（支持 `DateTime`、`Widget`、`HostSwitch`、`ZoomReset`、`RotateLeft/Right`、`GestureZoomRotate` 等）、Ring、CLI 及 Python API/MCP 代码均在本目录同步更新，支持范围不等同于原版全部功能（不含固件更新）。
 
 ## 构建与离线验证
 
@@ -22,7 +26,7 @@ ctest --test-dir build-win32 --output-on-failure
 .\build-win32\logi-cli.exe check-config .\build-win32\mappings.ini
 ```
 
-CTest 运行实际生产 `run_agent/events` 路径，但用替身隔离 HID、窗口、时钟、进程操作与 SendInput，不接管鼠标。66 项覆盖连续媒体的两级阈值、400 毫秒间隔、方向与取消，以及原有会话、焦点切换、迟到释放、通知丢失、重连、重载、DPI 窗口、Pan、物理修饰键和部分注入失败。编译及替身通过不代表实体鼠标、登录启动或重启恢复通过。
+CTest 运行实际生产路径与隔离替身测试，总计 138 项，覆盖设置持久化（含 `close_to_tray`）、`.lp5` 压缩包、`HID++ 0x0003` 解析、Flow `127.0.0.1` 环回传输、`options_plus_import` JSON/DPI 解析、连续媒体、平滑滚轮与重连/恢复逻辑。编译及单测通过不代表全部多机/休眠/长期场景已验收。
 
 构建使用仓库自制示意图，不分发原版提取图片、字体、二进制或逆向转储。因此公开源码构建的图片与本机旧版截图不同。缺少原版图标字体时使用已有字体回退。
 

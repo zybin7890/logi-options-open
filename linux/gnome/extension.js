@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Runs inside GNOME Shell, not an Xwayland client. Installation is opt-in.
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';

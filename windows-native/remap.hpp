@@ -24,7 +24,7 @@ ReloadResult reload_agent_confirmed(const wchar_t* path,unsigned long long revis
 const char* reload_status_name(ReloadStatus status);
 // True only while this incarnation and its last successful commit still match.
 bool is_current_reload_result(const ReloadResult& result);
-int preview_ring(const wchar_t* path);
+int preview_ring(const wchar_t* path,const wchar_t* section=nullptr);
 int play_actions(const wchar_t* path, bool validate_only);
 bool check_mappings(const wchar_t* path);
 bool options_running();
@@ -77,6 +77,9 @@ struct AgentSettingsSnapshot {
     std::array<unsigned,5> observed{};
     std::array<unsigned long long,5> sampled_at_ms{};
     unsigned observed_mask{},software_mask{};
+    bool wheel_mode_valid{};
+    unsigned wheel_mode{};
+    unsigned long long wheel_mode_sampled_at_ms{};
 };
 // Cached last verified readback, never a new hardware query. Per-field timestamps
 // allow callers to distinguish this logical snapshot from a live device response.

@@ -12,13 +12,20 @@
 #include <map>
 #include <functional>
 #include <array>
+#include <atomic>
 #define CHECK(x) do {if(!(x))throw std::runtime_error(#x);}while(0)
 static bool stopped,restore_ok;
-static unsigned foreground_app=1;
+static std::atomic<unsigned> foreground_app{1};
 static std::function<void(unsigned)> before_step;
 static std::function<unsigned(UINT,LPINPUT)> input_result;
+static std::function<void(DWORD)> after_sleep;
+static std::function<void(HANDLE,DWORD)> observe_wait;
+static std::function<bool(unsigned)> accept_connection;
 static std::array<bool,256> physical_keys{};
 static std::string mode;
+static std::wstring fixture_app_name;
+static bool respect_read_deadlines;
+static bool settings_fixture;
 static bool fixture_has_xy;
 static bool fixture_xy(){return fixture_has_xy;}
 static ULONGLONG tick=100;
@@ -53,6 +60,7 @@ static LONG64 observed_checked{},idle_age{};
 alignas(16) static unsigned char health_buffer[1024];
 alignas(16) static unsigned char owner_buffer[4096];
 alignas(16) static unsigned char reload_buffer[4096];
+alignas(16) static unsigned char settings_buffer[8192];
 static LONG speed_buffer;
 static unsigned created_events;
 HANDLE WINAPI fake_mutex(LPSECURITY_ATTRIBUTES,BOOL,LPCWSTR){return reinterpret_cast<HANDLE>(11);}
@@ -62,33 +70,41 @@ BOOL WINAPI fake_processfirst(HANDLE,LPPROCESSENTRY32W){return FALSE;}
 BOOL WINAPI fake_processnext(HANDLE,LPPROCESSENTRY32W){return FALSE;}
 HANDLE WINAPI fake_event(LPSECURITY_ATTRIBUTES,BOOL,BOOL,LPCWSTR){return reinterpret_cast<HANDLE>(100+(++created_events));}
 BOOL WINAPI fake_close(HANDLE){return TRUE;}
-HANDLE WINAPI fake_mapping(HANDLE,LPSECURITY_ATTRIBUTES,DWORD,DWORD,DWORD,LPCWSTR name){if(wcsstr(name,L".Settings"))return nullptr;if(wcsstr(name,L".ReloadAck"))return mode.starts_with("reload-")?reinterpret_cast<HANDLE>(24):nullptr;if(wcsstr(name,L".Dpi"))return mode.starts_with("owner-")?reinterpret_cast<HANDLE>(23):nullptr;return reinterpret_cast<HANDLE>(wcsstr(name,L"Health")?21:22);}
-LPVOID WINAPI fake_map(HANDLE handle,DWORD,DWORD,DWORD,SIZE_T){if(handle==reinterpret_cast<HANDLE>(24))return reload_buffer;if(handle==reinterpret_cast<HANDLE>(23))return owner_buffer;return handle==reinterpret_cast<HANDLE>(21)?static_cast<void*>(health_buffer):static_cast<void*>(&speed_buffer);}
+HANDLE WINAPI fake_mapping(HANDLE,LPSECURITY_ATTRIBUTES,DWORD,DWORD,DWORD,LPCWSTR name){if(wcsstr(name,L".Settings"))return settings_fixture?reinterpret_cast<HANDLE>(25):nullptr;if(wcsstr(name,L".ReloadAck"))return mode.starts_with("reload-")?reinterpret_cast<HANDLE>(24):nullptr;if(wcsstr(name,L".Dpi"))return mode.starts_with("owner-")?reinterpret_cast<HANDLE>(23):nullptr;return reinterpret_cast<HANDLE>(wcsstr(name,L"Health")?21:22);}
+LPVOID WINAPI fake_map(HANDLE handle,DWORD,DWORD,DWORD,SIZE_T){if(handle==reinterpret_cast<HANDLE>(25))return settings_buffer;if(handle==reinterpret_cast<HANDLE>(24))return reload_buffer;if(handle==reinterpret_cast<HANDLE>(23))return owner_buffer;return handle==reinterpret_cast<HANDLE>(21)?static_cast<void*>(health_buffer):static_cast<void*>(&speed_buffer);}
+#ifdef LOGI_TEST_SETTINGS_SNAPSHOT
+HANDLE WINAPI fake_open_mapping(DWORD,BOOL,LPCWSTR name){return settings_fixture&&wcsstr(name,L".Settings")?reinterpret_cast<HANDLE>(25):nullptr;}
+#define OpenFileMappingW fake_open_mapping
+#endif
 BOOL WINAPI fake_event_set(HANDLE){return TRUE;}
 BOOL WINAPI fake_event_reset(HANDLE h){if(h==reinterpret_cast<HANDLE>(102))reload_signal=false;return TRUE;}
 BOOL WINAPI fake_unmap(LPCVOID){return TRUE;}
 BOOL WINAPI fake_handler(PHANDLER_ROUTINE,BOOL){return TRUE;}
-DWORD WINAPI fake_wait(HANDLE h,DWORD){if(h==reinterpret_cast<HANDLE>(11))return WAIT_OBJECT_0;if(h==reinterpret_cast<HANDLE>(102)&&reload_signal)return WAIT_OBJECT_0;return h==reinterpret_cast<HANDLE>(101)&&stopped?WAIT_OBJECT_0:WAIT_TIMEOUT;}
+DWORD WINAPI fake_wait(HANDLE h,DWORD duration){if(observe_wait)observe_wait(h,duration);if(h==reinterpret_cast<HANDLE>(11))return WAIT_OBJECT_0;if(h==reinterpret_cast<HANDLE>(102)&&reload_signal)return WAIT_OBJECT_0;return h==reinterpret_cast<HANDLE>(101)&&stopped?WAIT_OBJECT_0:WAIT_TIMEOUT;}
 BOOL WINAPI fake_release_mutex(HANDLE){return TRUE;}
 ULONGLONG WINAPI fake_clock(){return tick;}
 BOOL WINAPI fake_lastinput(PLASTINPUTINFO input){input->dwTime=mode=="idle-resume"?input_stamp:static_cast<DWORD>(tick);return TRUE;}
 BOOL WINAPI fake_peek(LPMSG,HWND,UINT,UINT,UINT){return FALSE;}
 UINT WINAPI fake_input(UINT n,LPINPUT input,int){const auto accepted=input_result?input_result(n,input):n;CHECK(accepted<=n);captured.insert(captured.end(),input,input+accepted);for(unsigned i=0;i<accepted;++i)capture_times.push_back(tick);return accepted;}
 HWND WINAPI fake_foreground(){return reinterpret_cast<HWND>(static_cast<uintptr_t>(foreground_app));}
-static DWORD foreground_pid_override;
-DWORD WINAPI fake_window_pid(HWND window,LPDWORD pid){*pid=foreground_pid_override?foreground_pid_override:static_cast<DWORD>(reinterpret_cast<uintptr_t>(window));return *pid;}
+static std::atomic<DWORD> foreground_pid_override{};
+DWORD WINAPI fake_window_pid(HWND window,LPDWORD pid){const auto override_pid=foreground_pid_override.load();*pid=override_pid?override_pid:static_cast<DWORD>(reinterpret_cast<uintptr_t>(window));return *pid;}
 HANDLE WINAPI fake_open_process(DWORD,BOOL,DWORD pid){return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(1000+pid));}
-BOOL WINAPI fake_process_path(HANDLE handle,DWORD,LPWSTR path,PDWORD size){const auto pid=reinterpret_cast<uintptr_t>(handle)-1000;const wchar_t* name=pid==1?L"C:\\Apps\\a.exe":L"C:\\Apps\\b.exe";const auto n=std::wcslen(name);CHECK(*size>n);std::wcscpy(path,name);*size=static_cast<DWORD>(n);return TRUE;}
+BOOL WINAPI fake_process_path(HANDLE handle,DWORD,LPWSTR path,PDWORD size){const auto pid=reinterpret_cast<uintptr_t>(handle)-1000;const wchar_t* name=pid==1?(fixture_app_name.empty()?L"C:\\Apps\\a.exe":fixture_app_name.c_str()):L"C:\\Apps\\b.exe";const auto n=std::wcslen(name);CHECK(*size>n);std::wcscpy(path,name);*size=static_cast<DWORD>(n);return TRUE;}
 SHORT WINAPI fake_key(int key){return key>=0&&key<256&&physical_keys[key]?SHORT(0x8000):0;}
 static bool allow_open,fail_open;
 HINSTANCE WINAPI fake_shell(HWND,LPCWSTR,LPCWSTR,LPCWSTR,LPCWSTR,INT){CHECK(allow_open);if(fail_open)return reinterpret_cast<HINSTANCE>(31);foreground_app=2;return reinterpret_cast<HINSTANCE>(33);}
 BOOL WINAPI fake_show(HWND,INT){throw std::runtime_error("unexpected window mutation");}
 BOOL WINAPI fake_lock(){throw std::runtime_error("unexpected desktop lock");}
-void WINAPI fake_sleep(DWORD duration){tick+=duration;}
+void WINAPI fake_sleep(DWORD duration){tick+=duration;if(after_sleep)after_sleep(duration);}
 BOOL WINAPI fake_terminate(HANDLE,UINT){throw std::runtime_error("unexpected process mutation");}
 BOOL WINAPI fake_createprocess(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCWSTR,LPSTARTUPINFOW,LPPROCESS_INFORMATION){throw std::runtime_error("unexpected process spawn");}
 BOOL WINAPI fake_register(HWND,int id,UINT,UINT key){++reload_hotkeys;if(mode=="reload-hotkey-fail"&&input_index>0&&!reload_faults){++reload_faults;return FALSE;}registered_hotkeys[id]=key;return TRUE;}
 BOOL WINAPI fake_unregister(HWND,int id){registered_hotkeys.erase(id);return TRUE;}
+HHOOK WINAPI fake_keyboard_hook(int kind,HOOKPROC,HINSTANCE,DWORD){
+ CHECK(kind==WH_KEYBOARD_LL);MSG message{};PeekMessageW(&message,nullptr,0,0,PM_NOREMOVE);return reinterpret_cast<HHOOK>(1);
+}
+BOOL WINAPI fake_keyboard_unhook(HHOOK){return TRUE;}
 #define CreateMutexW fake_mutex
 #define GetLastError fake_error
 #define CreateToolhelp32Snapshot fake_snapshot
@@ -121,10 +137,19 @@ BOOL WINAPI fake_unregister(HWND,int id){registered_hotkeys.erase(id);return TRU
 #define CreateProcessW fake_createprocess
 #define RegisterHotKey fake_register
 #define UnregisterHotKey fake_unregister
+#define SetWindowsHookExW fake_keyboard_hook
+#define UnhookWindowsHookEx fake_keyboard_unhook
+#include "reject_effects.hpp"
 #include "../remap.cpp"
+using RequestOverride=std::function<std::optional<logi::Reply>(logi::Byte,logi::Byte,std::span<const logi::Byte>)>;
+static RequestOverride channel_request_result,mouse_request_result;
+static std::function<void(logi::Mouse&)> configure_mouse;
+static std::function<std::optional<unsigned>(logi::Mouse&,std::wstring_view)> get_override;
+static std::function<bool(logi::Mouse&,std::wstring_view,unsigned)> set_override;
+static std::function<bool(const std::filesystem::path&,const logi::Mouse&,unsigned)> remember_dpi_override;
 static std::function<int()> ring_choice;
-int choose_ring_action(std::span<const std::wstring>,HANDLE,bool){CHECK(ring_choice);return ring_choice();}
-struct Step {bool down{};int x{};bool motion{},change{},loss{};ULONGLONG at{};bool thumb{};int y{};unsigned app{};bool disconnect{},stop{};};
+int choose_ring_action(std::span<const std::wstring>,HANDLE,bool,std::span<const RingIcon>,float){CHECK(ring_choice);return ring_choice();}
+struct Step {bool down{};int x{};bool motion{},change{},loss{};ULONGLONG at{};bool thumb{};int y{};unsigned app{};bool disconnect{},stop{},main_wheel{},idle{};unsigned wheel_flags{0x11};int wheel_delta{1};};
 static std::vector<Step> steps;
 namespace logi {
 Channel::Channel(const Interface&,HANDLE){}
@@ -163,12 +188,14 @@ Reply Channel::read(DWORD timeout,bool,HANDLE){
  }
  if(queued_) {const auto i=(next_+notifications_.size()-queued_)%notifications_.size();--queued_;return {Result::ok,notifications_[i]};}
  if(!steps.empty() && input_index<steps.size()) {
+     if(respect_read_deadlines&&timeout!=INFINITE&&steps[input_index].at>tick+timeout){tick+=timeout;return {Result::timeout};}
      const auto s=steps[input_index++];
      if(s.app)foreground_app=s.app;
      if(before_step)before_step(input_index);
      if(s.disconnect)return {Result::io_error};
      if(s.stop){stopped=true;return {Result::stopped};}
      if(s.at)tick=std::max(tick,s.at);
+     if(s.idle)return {Result::timeout};
      if(mode.starts_with("reload-")&&input_index==1) {
          auto& command=*reinterpret_cast<reload_ipc::Shared*>(reload_buffer);
          CHECK(command.running&&command.version==reload_ipc::protocol);
@@ -204,12 +231,14 @@ Reply Channel::read(DWORD timeout,bool,HANDLE){
      if(mode=="gesture-watchdog-loss"&&input_index==2)tick=3100;
      if(mode=="gesture-watchdog-loss"&&input_index==3)tick=8100;
      Reply r{Result::ok};r.packet.size=20;r.packet.bytes[0]=0x11;r.packet.bytes[1]=1;r.packet.bytes[2]=s.thumb?6:7;r.packet.bytes[3]=s.motion?0x10:0;
+     if(s.main_wheel){r.packet.bytes[2]=5;r.packet.bytes[4]=static_cast<Byte>(s.wheel_flags);r.packet.bytes[5]=high(s.wheel_delta);r.packet.bytes[6]=low(s.wheel_delta);return r;}
      auto value=s.thumb?1u:s.motion?unsigned(s.x):(s.down?0x52u:0u);r.packet.bytes[4]=high(value);r.packet.bytes[5]=low(value);if(s.motion){r.packet.bytes[6]=high(unsigned(s.y));r.packet.bytes[7]=low(unsigned(s.y));}return r;
  }
  if((mode=="retry"||mode=="reporting")&&read_calls==1){tick=3100;return {Result::timeout};}
  stopped=true;return {Result::stopped};
 }
 Reply Channel::request(Byte,Byte feature,Byte function,std::initializer_list<Byte> parameters,DWORD){
+ if(channel_request_result)if(const auto reply=channel_request_result(feature,function,{parameters.begin(),parameters.size()}))return *reply;
  ++reporting_requests;
  if(feature==8){Reply r{Result::ok};r.packet.size=20;r.packet.bytes[4]=static_cast<Byte>(report_shift_mode);r.packet.bytes[5]=10;return r;}
  if(mode=="gesture-watchdog-loss" && read_calls==3){++pending_loss_;++lost_notifications_;++injected_loss;return {Result::notification_loss};}
@@ -244,12 +273,16 @@ Result Channel::send(Byte,Byte,Byte,std::initializer_list<Byte>,DWORD) {
  if(mode=="owner-window-released"||mode=="reload-window-released")push(false,false,0);
  return Result::ok;
 }
-std::optional<Mouse> connect(HANDLE,bool){++connects;if(mode.starts_with("reload-")&&connects==2){CHECK(health&&health->mappings_ready==0);reload_failed_ready=true;report_button=0;}if(mode=="reconnect" && connects==2)CHECK(health && health->ready==0 && health->mappings_ready==0 && health->pid==first_pid);Mouse m{};m.device={1,2,0,"MX Master 3S"};m.buttons=7;m.dpi=9;if(mode=="async-wheel-cancel"||mode=="async-past-wheel")m.shift=8;if(mode=="async-repair-thumb")m.thumb=6;m.dpi_choices={1000,5000};m.channel=std::make_unique<Channel>(Interface{});return m;}
+std::optional<Mouse> connect(HANDLE,bool){++connects;if(accept_connection&&!accept_connection(connects))return {};if(mode.starts_with("reload-")&&connects==2){CHECK(health&&health->mappings_ready==0);reload_failed_ready=true;report_button=0;}if(mode=="reconnect" && connects==2)CHECK(health && health->ready==0 && health->mappings_ready==0 && health->pid==first_pid);Mouse m{};m.device={1,2,0,"MX Master 3S"};m.buttons=7;m.dpi=9;if(mode=="async-wheel-cancel"||mode=="async-past-wheel")m.shift=8;if(mode=="async-repair-thumb")m.thumb=6;m.dpi_choices={1000,5000};m.channel=std::make_unique<Channel>(Interface{});if(configure_mouse)configure_mouse(m);return m;}
 bool restore_standard_input(Mouse&){return true;}
+#ifndef LOGI_TEST_SETTINGS_SNAPSHOT
+bool switch_host(Mouse&,unsigned){return true;}
+#endif
 bool restore_saved_dpi(const std::filesystem::path&,Mouse&){++restores;return restore_ok||(mode=="retry"&&restores>1)||(mode=="reconnect"&&connects>1);}
 bool read_saved_settings(const std::filesystem::path&,const Mouse&,SavedSettings&){return true;}
 bool remember_settings(const std::filesystem::path&,const Mouse&,const SavedSettings&){return true;}
 std::optional<unsigned> get(Mouse& mouse,std::wstring_view key){
+ if(get_override)return get_override(mouse,key);
  if(key==L"ratchet"){CHECK(!mouse.channel->control_pending());return 1;}
  CHECK(key==L"dpi");
  ++sync_dpi_reads;if(mode=="async-sidecar")CHECK(sync_dpi_reads==1);
@@ -257,9 +290,10 @@ std::optional<unsigned> get(Mouse& mouse,std::wstring_view key){
  if(mode=="gesture-readback-recovery"&&read_calls==4&&!dpi_read_failed){dpi_read_failed=true;return {};}
  return actual_dpi;
 }
-bool set(Mouse& mouse,std::wstring_view key,unsigned value){if(key==L"ratchet"){CHECK(!mouse.channel->control_pending());++wheel_writes;report_shift_mode=value?2:1;return true;}CHECK(mode.starts_with("owner-")&&key==L"dpi");CHECK(!health->settings_ready);if(mode=="owner-priority")CHECK(reporting_requests==0);if(mode=="owner-async-preempt"||mode=="owner-repair-preempt")CHECK(async_cancels==1&&!mouse.channel->control_pending());++dpi_writes;actual_dpi=value;if(mode.starts_with("owner-window"))mouse.channel->send(1,1,1);return true;}
-bool remember_dpi(const std::filesystem::path& path,const Mouse&,unsigned value){CHECK(mode.starts_with("owner-")&&value==actual_dpi&&dpi_writes==1);saved_path=path;++dpi_saves;return true;}
+bool set(Mouse& mouse,std::wstring_view key,unsigned value){if(set_override)return set_override(mouse,key,value);if(key==L"ratchet"){CHECK(!mouse.channel->control_pending());++wheel_writes;report_shift_mode=value?2:1;return true;}CHECK(mode.starts_with("owner-")&&key==L"dpi");CHECK(!health->settings_ready);if(mode=="owner-priority")CHECK(reporting_requests==0);if(mode=="owner-async-preempt"||mode=="owner-repair-preempt")CHECK(async_cancels==1&&!mouse.channel->control_pending());++dpi_writes;actual_dpi=value;if(mode.starts_with("owner-window"))mouse.channel->send(1,1,1);return true;}
+bool remember_dpi(const std::filesystem::path& path,const Mouse& device,unsigned value){if(remember_dpi_override)return remember_dpi_override(path,device,value);CHECK(mode.starts_with("owner-")&&value==actual_dpi&&dpi_writes==1);saved_path=path;++dpi_saves;return true;}
 Reply Mouse::request(Byte feature,Byte function,std::initializer_list<Byte> parameters){
+ if(mouse_request_result)if(const auto reply=mouse_request_result(feature,function,{parameters.begin(),parameters.size()}))return *reply;
  if(feature==8){Reply r{Result::ok};r.packet.size=20;r.packet.bytes[4]=static_cast<Byte>(report_shift_mode);r.packet.bytes[5]=10;return r;}
  if(mode.starts_with("reload-")&&feature==7) {
      CHECK(parameters.size()>=2);auto p=parameters.begin();Reply r{Result::ok};r.packet.size=20;r.packet.bytes[4]=p[0];r.packet.bytes[5]=p[1];

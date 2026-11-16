@@ -43,4 +43,102 @@ public:
         return direction;
     }
 };
+
+enum class PresetKind {
+    zoom_rotate = 1,
+    app_nav = 2,
+    virtual_desktops = 3,
+    window_management = 4,
+    arrange_windows = 5
+};
+
+// Multi-preset continuous pointer gesture state machine implementing direction locking
+// (e.g., Zoom/Rotate) and cooldown-gated continuous stepping (pauseBetweenActionsMs = 300ms).
+class ContinuousPreset {
+    enum class Axis { none, horizontal, vertical };
+    PresetKind kind_{PresetKind::zoom_rotate};
+    Axis locked_axis_{Axis::none};
+    int x_{}, y_{};
+    bool engaged_{};
+    std::uint64_t last_action_ms_{};
+
+public:
+    void start(PresetKind kind) {
+        *this = {};
+        kind_ = kind;
+    }
+    void reset() { *this = {}; }
+    PresetKind kind() const { return kind_; }
+    bool engaged() const { return engaged_; }
+    bool direction_locked() const { return kind_ == PresetKind::zoom_rotate; }
+
+    // Returns 1=left, 2=right, 3=up, 4=down (matching Gesture enum values).
+    std::optional<int> move(int x, int y, std::uint64_t now, int start_threshold, int action_threshold) {
+        constexpr std::uint64_t cooldown_ms = 300;
+        x_ = std::clamp(x_ + x, -100000, 100000);
+        y_ = std::clamp(y_ + y, -100000, 100000);
+        const bool lock_axis = direction_locked();
+
+        if (!engaged_) {
+            if (std::abs(x_) >= start_threshold && std::abs(x_) >= std::abs(y_)) {
+                engaged_ = true;
+                if (lock_axis) locked_axis_ = Axis::horizontal;
+                const int dir = x_ < 0 ? 1 : 2;
+                x_ = y_ = 0;
+                last_action_ms_ = now;
+                return dir;
+            }
+            if (std::abs(y_) >= start_threshold && std::abs(y_) > std::abs(x_)) {
+                engaged_ = true;
+                if (lock_axis) locked_axis_ = Axis::vertical;
+                const int dir = y_ < 0 ? 3 : 4;
+                x_ = y_ = 0;
+                last_action_ms_ = now;
+                return dir;
+            }
+            return std::nullopt;
+        }
+
+        if (now - last_action_ms_ < cooldown_ms) {
+            if (lock_axis) {
+                if (locked_axis_ == Axis::horizontal) y_ = 0;
+                else if (locked_axis_ == Axis::vertical) x_ = 0;
+            }
+            return std::nullopt;
+        }
+
+        if (lock_axis && locked_axis_ == Axis::horizontal) {
+            if (std::abs(x_) >= action_threshold) {
+                const int dir = x_ < 0 ? 1 : 2;
+                x_ = y_ = 0;
+                last_action_ms_ = now;
+                return dir;
+            }
+            return std::nullopt;
+        }
+        if (lock_axis && locked_axis_ == Axis::vertical) {
+            if (std::abs(y_) >= action_threshold) {
+                const int dir = y_ < 0 ? 3 : 4;
+                x_ = y_ = 0;
+                last_action_ms_ = now;
+                return dir;
+            }
+            return std::nullopt;
+        }
+
+        if (std::abs(x_) >= action_threshold && std::abs(x_) >= std::abs(y_)) {
+            const int dir = x_ < 0 ? 1 : 2;
+            x_ = y_ = 0;
+            last_action_ms_ = now;
+            return dir;
+        }
+        if (std::abs(y_) >= action_threshold && std::abs(y_) > std::abs(x_)) {
+            const int dir = y_ < 0 ? 3 : 4;
+            x_ = y_ = 0;
+            last_action_ms_ = now;
+            return dir;
+        }
+        return std::nullopt;
+    }
+};
 }

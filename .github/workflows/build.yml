@@ -128,3 +128,31 @@ jobs:
         with:
           name: logi-options-open-windows-x64
           path: build/logi-options-open-*.zip
+  windows-native:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+      - name: Configure and build windows-native
+        run: |
+          cmake -S windows-native -B build-win32 -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-win32 --parallel 2
+      - name: Run windows-native CTest suite
+        run: |
+          ctest --test-dir build-win32 --output-on-failure -V
+          ./build-win32/logi-cli.exe check-config ./build-win32/mappings.ini
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logi-native-win32-candidate
+          path: |
+            build-win32/logi-native.exe
+            build-win32/logi-cli.exe
+            build-win32/mappings.ini
+            build-win32/bridge.py

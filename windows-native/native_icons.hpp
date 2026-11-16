@@ -5,6 +5,7 @@
 #include <gdiplus.h>
 
 #include <array>
+#include <cmath>
 #include <initializer_list>
 #include <string_view>
 
@@ -94,6 +95,9 @@ inline void draw_native_icon(Gdiplus::Graphics& graphics, std::wstring_view name
         rounded(8.6f, 9.0f, 12.4f, 8.8f, 1.1f);
         line(14.8f, 18.0f, 14.8f, 20.0f);
         line(11.8f, 20.5f, 17.8f, 20.5f);
+    } else if (name == L"gear") {
+        circle(12.0f,12.0f,6.6f);circle(12.0f,12.0f,2.6f);
+        for(int i=0;i<8;++i){const float angle=static_cast<float>(i)*3.14159265f/4;const float dx=std::cos(angle),dy=std::sin(angle);line(12+dx*6.6f,12+dy*6.6f,12+dx*9,12+dy*9);}
     } else if (name == L"settings") {
         for (const float cy : {5.75f, 12.0f, 18.25f}) {
             dot(4.0f, cy, 0.95f);

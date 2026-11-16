@@ -1,12 +1,109 @@
 #include "mouse.hpp"
 #include "remap.hpp"
-#include "../first_run.hpp"
+#include "notifications_hud.hpp"
+#include "ui_settings.hpp"
+#include "flow.hpp"
 
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 
 namespace {
+
+struct FlowRuntime {
+    std::mutex mutex;
+    flow::Controller controller;
+    bool active{};
+    unsigned active_port{};
+    std::string active_pin;
+    ULONGLONG last_edge_ms{};
+    ULONGLONG last_beacon_ms{};
+
+    void stop() {
+        std::lock_guard lock(mutex);
+        if (active) {
+            controller.stop();
+            active = false;
+        }
+    }
+
+    unsigned poll(const ui_settings::Settings& settings, std::wstring& peer_name) {
+        std::lock_guard lock(mutex);
+        if (!settings.flow_enabled) {
+            if (active) {
+                controller.stop();
+                active = false;
+            }
+            return 0;
+        }
+        const std::string pin = ui_settings::wide_to_utf8(settings.flow_pin);
+        if (!active || active_port != settings.flow_port || active_pin != pin) {
+            controller.stop();
+            wchar_t host_buf[128]{};
+            DWORD host_len = std::size(host_buf);
+            if (!GetComputerNameW(host_buf, &host_len)) wcscpy_s(host_buf, L"LogiNative-PC");
+            const std::string host_utf8 = ui_settings::wide_to_utf8(host_buf);
+            const unsigned sw = static_cast<unsigned>(std::max(640, GetSystemMetrics(SM_CXSCREEN)));
+            const unsigned sh = static_cast<unsigned>(std::max(480, GetSystemMetrics(SM_CYSCREEN)));
+            flow::Controller::Callbacks cb;
+            cb.on_edge_enter = [share_clip = settings.flow_share_clipboard, light = ui_settings::effective_light(settings.theme)](const flow::EdgeEvent& ev) {
+                const RECT desktop{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                                   GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                                   GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+                const POINT arrival = flow::map_arrival_cursor(desktop, ev.edge, ev.normalized_axis);
+                SetCursorPos(arrival.x, arrival.y);
+                if (share_clip && !ev.clipboard_text.empty()) {
+                    flow::write_clipboard_text(ev.clipboard_text);
+                }
+                notifications_hud::dispatch_show(L"Logi Flow", L"已切入本机 · 来自 " + ev.peer_name,
+                                                 notifications_hud::Kind::flow, 1600, light);
+            };
+            cb.on_clipboard = [share_clip = settings.flow_share_clipboard](const std::wstring& text) {
+                if (share_clip && !text.empty()) flow::write_clipboard_text(text);
+            };
+            active = controller.start(settings.flow_port, pin, host_utf8, host_utf8, sw, sh, std::move(cb), true);
+            active_port = settings.flow_port;
+            active_pin = pin;
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (active && now - last_beacon_ms >= 5000) {
+            last_beacon_ms = now;
+            controller.broadcast_presence();
+        }
+        if (!active || settings.flow_peers.empty() || now - last_edge_ms < 800) return 0;
+        POINT cursor{};
+        if (!GetCursorPos(&cursor)) return 0;
+        const RECT desktop{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                           GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                           GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+        const bool ctrl_down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        const auto hit = flow::evaluate_edge_hit(cursor, desktop, settings.flow_peers,
+                                                 settings.flow_hold_ctrl, ctrl_down, settings.flow_edge_corners);
+        if (!hit || hit->peer_index >= settings.flow_peers.size()) return 0;
+        const auto& peer = settings.flow_peers[hit->peer_index];
+        const std::wstring clip = settings.flow_share_clipboard ? flow::read_clipboard_text().value_or(L"") : std::wstring{};
+        if (controller.send_edge_switch(peer, hit->normalized_axis, clip, pin, 900)) {
+            last_edge_ms = now;
+            peer_name = peer.name;
+            return peer.host_slot;
+        }
+        return 0;
+    }
+};
+
+FlowRuntime& flow_runtime() {
+    static FlowRuntime rt;
+    return rt;
+}
+
+unsigned flow_poll_bridge(const ui_settings::Settings& s, std::wstring& peer_name) {
+    return flow_runtime().poll(s, peer_name);
+}
+
+void flow_stop_bridge() {
+    flow_runtime().stop();
+}
 
 void json_string(std::string_view value) {
     std::putchar('"');
@@ -18,7 +115,7 @@ void json_string(std::string_view value) {
     std::putchar('"');
 }
 
-const char* json_boolean(bool value) { return value ? "true" : "false"; }
+const char* boolean(bool value) { return value ? "true" : "false"; }
 
 std::optional<unsigned> read_status_setting(logi::Mouse& mouse,std::wstring_view setting,
                                           const AgentSettingsSnapshot& cached,bool owned) {
@@ -31,6 +128,9 @@ void print_status_text(logi::Mouse& mouse) {
     const auto cached=read_agent_settings();
     const bool owned=cached.available || agent_running();
     std::printf("%s (slot %u, HID++ %u.%u)\n",mouse.device.name.c_str(),mouse.device.slot,mouse.device.major,mouse.device.minor);
+    if (!mouse.device.serial.empty()) std::printf("serial=%ls\n", mouse.device.serial.c_str());
+    if (!mouse.device.firmware.empty()) std::printf("firmware=%ls\n", mouse.device.firmware.c_str());
+    if (!mouse.device.receiver_firmware.empty()) std::printf("receiver-firmware=%ls\n", mouse.device.receiver_firmware.c_str());
     if (const auto battery=mouse.request(mouse.battery,mouse.unified_battery?1:0);battery) {
         const auto data=battery.packet.data();
         if (data[0]>0 && data[0]<=100) std::printf("battery=%u%% ",data[0]);
@@ -42,7 +142,7 @@ void print_status_text(logi::Mouse& mouse) {
     }
     if (owned) std::printf("thumb-direction-source=%s software=%s sampled_at_ms=%llu\n",
         cached.available && (cached.observed_mask&16u)?"daemon-last-confirmed":"unknown",
-        json_boolean(cached.available && (cached.software_mask&16u)),cached.sampled_at_ms[4]);
+        boolean(cached.available && (cached.software_mask&16u)),cached.sampled_at_ms[4]);
     if (!mouse.dpi_choices.empty()) {
         std::printf("dpi-options:");
         for (const auto value:mouse.dpi_choices) std::printf(" %u",value);
@@ -65,8 +165,8 @@ void print_hosts(const std::vector<logi::HostSlot>& slots) {
     for (const auto& slot : slots) {
         if (!first) std::putchar(',');
         first = false;
-        std::printf("{\"slot\":%u,\"current\":%s,\"paired\":%s}", slot.slot, json_boolean(slot.current),
-                    slot.paired ? json_boolean(*slot.paired) : "null");
+        std::printf("{\"slot\":%u,\"current\":%s,\"paired\":%s}", slot.slot, boolean(slot.current),
+                    slot.paired ? boolean(*slot.paired) : "null");
     }
     std::puts("]");
 }
@@ -76,8 +176,21 @@ void print_status(logi::Mouse& mouse) {
     const bool owned=cached.available || agent_running();
     std::printf("{\"device\":");
     json_string(mouse.device.name);
-    std::printf(",\"receiver_slot\":%u,\"hidpp\":\"%u.%u\",\"battery\":",
+    std::printf(",\"receiver_slot\":%u,\"hidpp\":\"%u.%u\"",
                 mouse.device.slot, mouse.device.major, mouse.device.minor);
+    if (!mouse.device.serial.empty()) {
+        std::fputs(",\"serial\":", stdout);
+        json_string(ui_settings::wide_to_utf8(mouse.device.serial));
+    }
+    if (!mouse.device.firmware.empty()) {
+        std::fputs(",\"firmware\":", stdout);
+        json_string(ui_settings::wide_to_utf8(mouse.device.firmware));
+    }
+    if (!mouse.device.receiver_firmware.empty()) {
+        std::fputs(",\"receiver_firmware\":", stdout);
+        json_string(ui_settings::wide_to_utf8(mouse.device.receiver_firmware));
+    }
+    std::fputs(",\"battery\":", stdout);
     const auto battery = mouse.request(mouse.battery, mouse.unified_battery ? 1 : 0);
     if (battery && battery.packet.data()[0] <= 100) std::printf("%u", battery.packet.data()[0]);
     else std::fputs("null", stdout);
@@ -94,35 +207,41 @@ void print_status(logi::Mouse& mouse) {
     std::printf("},\"thumb_direction_source\":\"%s\",\"thumb_direction_software\":%s,"
                 "\"thumb_direction_sampled_at_ms\":%llu,\"dpi_choices\":[",
                 owned?(cached.available && (cached.observed_mask&16u)?"daemon_last_confirmed":"unknown"):"hardware_readback",
-                json_boolean(cached.available && (cached.software_mask&16u)),cached.sampled_at_ms[4]);
+                boolean(cached.available && (cached.software_mask&16u)),cached.sampled_at_ms[4]);
     for (std::size_t i = 0; i < mouse.dpi_choices.size(); ++i) {
         if (i) std::putchar(',');
         std::printf("%u", mouse.dpi_choices[i]);
     }
-    std::puts("]}");
+    std::fputs("]",stdout);
+    std::optional<unsigned> wheel_mode;
+    auto sampled_at=cached.wheel_mode_sampled_at_ms;
+    const char* source="unknown";
+    if(cached.available&&cached.wheel_mode_valid){wheel_mode=cached.wheel_mode;source="daemon_last_confirmed";}
+    else if(!owned) {
+        const auto mode=mouse.request(mouse.wheel,1);
+        if(mode&&mode.packet.size>=5){wheel_mode=mode.packet.data()[0];sampled_at=GetTickCount64();source="hardware_readback";}
+    }
+    if(wheel_mode)
+        std::printf(",\"wheel_mode\":%u,\"wheel_target\":%u,\"wheel_mode_source\":\"%s\",\"wheel_mode_sampled_at_ms\":%llu",
+            *wheel_mode,*wheel_mode&1,source,sampled_at);
+    else std::fputs(",\"wheel_mode\":null,\"wheel_target\":null,\"wheel_mode_source\":\"unknown\",\"wheel_mode_sampled_at_ms\":null",stdout);
+    std::puts("}");
 }
 
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+    notifications_hud::init_hooks();
+    ui_settings::flow_poll_hook() = &flow_poll_bridge;
+    ui_settings::flow_stop_hook() = &flow_stop_bridge;
+    struct DaemonShutdownGuard {
+        ~DaemonShutdownGuard() {
+            flow_stop_bridge();
+            notifications_hud::shutdown();
+        }
+    } shutdown_guard;
     const std::wstring_view command = argc > 1 ? argv[1] : L"help";
-    if (command==L"disclaimer") { std::puts(loo::notice_text); return 0; }
-    if (command==L"check-disclaimer") {
-        if (!loo::notice_required()) return 0;
-        std::fprintf(stderr,"%s\nRun logi-cli accept-disclaimer after reading.\n",loo::notice_text);
-        return 2;
-    }
-    if (command==L"accept-disclaimer") {
-        std::puts(loo::notice_text);
-        return loo::accept_notice()?0:2;
-    }
-    const bool changes_input=command==L"watch" || command==L"run" || command==L"run-preview" ||
-        command==L"set" || command==L"switch-host" || command==L"play-actions";
-    if (changes_input && loo::notice_required()) {
-        std::fprintf(stderr,"%s\n\nRead the notice and run logi-cli accept-disclaimer to acknowledge it.\n",loo::notice_text);
-        return 2;
-    }
     if (command == L"list" && argc == 2) {
         logi::connect(nullptr, true);
         return 0;
@@ -154,7 +273,7 @@ int wmain(int argc, wchar_t** argv) {
             result.status=ReloadStatus::superseded;
         const bool confirmed=result.status==ReloadStatus::applied;
         std::printf("{\"confirmed\":%s,\"status\":\"%s\",\"request_id\":%llu,\"instance_id\":%llu,"
-                    "\"pid\":%lu,\"revision\":%llu,\"fingerprint\":\"",json_boolean(confirmed),
+                    "\"pid\":%lu,\"revision\":%llu,\"fingerprint\":\"",boolean(confirmed),
                     reload_status_name(result.status),result.request_id,result.instance_id,result.pid,result.revision);
         for (const auto byte:result.fingerprint) std::printf("%02x",static_cast<unsigned>(byte));
         std::puts("\"}");
@@ -210,8 +329,8 @@ int wmain(int argc, wchar_t** argv) {
                 is_current_setting_result(result);
             std::printf("{\"status\":\"%s\",\"confirmed\":%s,\"saved\":%s,\"software\":%s,"
                         "\"request_id\":%llu,\"instance_id\":%llu,\"pid\":%lu,\"revision\":%llu,\"observed\":{",
-                        setting_status_name(result.status),json_boolean(confirmed),json_boolean(confirmed && result.saved),
-                        json_boolean(result.software),result.request_id,result.instance_id,result.pid,result.revision);
+                        setting_status_name(result.status),boolean(confirmed),boolean(confirmed && result.saved),
+                        boolean(result.software),result.request_id,result.instance_id,result.pid,result.revision);
             bool first=true;
             for (unsigned bit=0;bit<std::size(wheel_keys);++bit) if (result.observed_mask&(1u<<bit)) {
                 if (!first) std::putchar(',');
@@ -241,7 +360,7 @@ int wmain(int argc, wchar_t** argv) {
             if (owned || result.status!=DpiCommandStatus::not_running) {
                 std::printf("dpi_status=%s request_id=%llu requested=%u applied=%s saved=%s\n",
                             dpi_command_status_name(result.status),result.request_id,result.requested,
-                            json_boolean(result.applied),json_boolean(result.saved));
+                            boolean(result.applied),boolean(result.saved));
                 if (result.observed_valid) std::printf("dpi=%u\n",result.observed);
                 if (!result.applied || !result.saved) {
                     std::fputs(result.applied?"Pointer speed applied, but could not save it for the next start.\n":

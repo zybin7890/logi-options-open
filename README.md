@@ -1,6 +1,6 @@
 # Logi Options Open
 
-> **Windows 独立后台继续验证，Linux 开发恢复推进。** 最新旧版 Win32 界面及后台候选见 [windows-native](windows-native/README.md)，其中包含独立构建入口、连续媒体手势和 66 项离线手势测试。Linux 保留共享 Qt 原生界面与 GNOME/KDE Wayland 桥接，继续修复启动与设备生命周期。候选尚未通过完整实体鼠标及整机重启验收，不作为稳定发行版。
+> **Windows 独立 Win32/C++26 候选已更新（138 项离线与环回单测通过），仓库开源协议已切换为 AGPL-3.0-or-later。** 最新 Win32 界面及后台候选见 [windows-native](windows-native/README.md)，包含独立构建入口、连续媒体手势、Flow 跨屏发现与剪贴板、Bolt/蓝牙配对、OSD 通知、`.lp5`/`.lp4` 动作环备份、系统托盘（`--tray`）、原版 `settings.db` 一键导入及中英双语界面。Linux 保留共享 Qt 原生界面与 GNOME/KDE Wayland 桥接。候选软件按实验性项目交付，不提供担保。
 
 **独立第三方、实验性、尚不成熟。与 Logitech / 罗技无隶属关系，未获其认可或支持。**
 
@@ -18,9 +18,9 @@
 | 电量、DPI、SmartShift、滚轮参数 | 已实现；MX Master 3S + Bolt 本机验证 | 已移植；需要 Linux 实机验收 |
 | 全局按键、拇指滚轮、四向手势 | 已实现；本机验证 | hidapi + uinput 后端；需要实机验收 |
 | 应用专属配置、全局快捷键 | 已实现 | X11；原生 GNOME/KDE Wayland 已通过实际桌面交互测试，鼠标硬件待验收 |
-| Smart Actions、Actions Ring | 已实现部分功能 | 结构化动作编辑、序列、原生环形菜单与子目录；原生剪贴板文本输入 |
+| Smart Actions、Actions Ring | 桌面编辑器、`DateTime`/`Widget`/`HostSwitch` 等动作、`.lp5`/`.lp4`/`.ini` 导入导出与槽位拖拽 | 结构化动作编辑、序列、原生环形菜单与子目录；原生剪贴板文本输入 |
 | HTTP API / MCP stdio / CLI | 已提供 | 已适配支持的 Linux 命令 |
-| Flow、配对、固件更新、完整官方插件兼容 | 未实现 | 未实现 |
+| Flow、配对、HUD 通知、托盘/配置迁移 | `windows-native` 已实现（Flow 已完成本地环回与协议单测；多机跨屏与蓝牙真机配对流程待多机验收）；固件更新不支持 | 未实现 |
 
 Windows 设备验证来自本项目开发过程；不意味着所有 Logitech 设备均兼容。Linux 的桌面/内核输入测试不等于鼠标硬件测试。Wayland 的应用识别、全局快捷键和 Text 输入通过原生 GNOME/KDE 桌面桥接实现，详见 [Linux 说明](linux/README.md#native-wayland-integration)。未启用对应桥接或缺少能力时明确拒绝相关配置，不用 Xwayland 冒充支持。[2026-11-11 验证记录](https://github.com/zybin7890/logi-options-open/actions/runs/43040247340)包含真实 GNOME/KDE Wayland 会话中的应用识别、快捷键释放顺序、Unicode 与连续文本输入、共享界面编辑以及 Ring 键盘焦点测试；测试没有连接物理鼠标。不要同时让 Solaar、logid 和本项目修改同一设备。
 
@@ -118,6 +118,6 @@ CI 分别构建 Windows 和 Linux。Linux 验收包括 Xvfb/Openbox 下的真实
 
 ## 资源与许可
 
-代码与本项目原创示意图以 MIT 许可开源，见 [LICENSE](LICENSE)。鼠标示意图、应用占位图标可通过 `python3 tools/generate-assets.py` 重建。没有分发原版 Options+ 可执行文件、图片、专有字体、反编译文件、个人配置或访问凭据。依赖和商标说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+代码与本项目原创示意图以 GNU Affero General Public License v3.0（`AGPL-3.0-or-later`）许可开源，见 [LICENSE](LICENSE)。鼠标示意图、应用占位图标可通过 `python3 tools/generate-assets.py` 重建。没有分发原版 Options+ 可执行文件、图片、专有字体、反编译文件、个人配置或访问凭据。依赖和商标说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。
 
 **Independent third-party project. Not affiliated with Logitech. Immature experimental software; no warranty. Windows device validation and Linux software-only validation are distinct.**
