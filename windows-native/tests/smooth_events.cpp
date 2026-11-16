@@ -78,15 +78,15 @@ int main(int argc,char** argv){try{
         else if(scenario=="negative"){steps[0].wheel_delta=-8;}
         else if(scenario=="malformed"){steps[0].wheel_flags=0x91;}
         else if(scenario=="input-rejected"){input_result=[](UINT,LPINPUT){return 0u;};}
-        else if(scenario=="focus"||scenario=="pid"||scenario=="stop"||scenario=="disconnect"||scenario=="reload"||scenario=="reload-enable"||scenario=="loss"||scenario=="main-only-loss") {
+        else if(scenario=="focus"||scenario=="pid"||scenario=="stop"||scenario=="disconnect"||scenario=="reload"||scenario=="reload-enable"||scenario=="loss"||scenario=="loss-no-neutral"||scenario=="main-only-loss") {
             Step cancel;cancel.at=115;cancel.idle=scenario=="focus"||scenario=="pid"||scenario=="reload"||scenario=="reload-enable";
-            cancel.app=scenario=="focus"?2:0;cancel.stop=scenario=="stop";cancel.disconnect=scenario=="disconnect";cancel.loss=scenario=="loss"||scenario=="main-only-loss";
+            cancel.app=scenario=="focus"?2:0;cancel.stop=scenario=="stop";cancel.disconnect=scenario=="disconnect";cancel.loss=scenario=="loss"||scenario=="loss-no-neutral"||scenario=="main-only-loss";
             steps.insert(steps.begin()+1,cancel);
             if(scenario=="pid")before_step=[](unsigned index){if(index==2)foreground_pid_override=42;};
             if(scenario=="reload")before_step=[&](unsigned index){if(index==2){std::ofstream(fixture_path)<<config(false);reload_signal=true;}};
             if(scenario=="reload-enable")before_step=[&](unsigned index){if(index==2){std::ofstream(fixture_path)<<config(true);reload_signal=true;}};
-            if(scenario=="disconnect"||scenario=="loss"||scenario=="reload-enable"||scenario=="main-only-loss") {
-                movement.at=150;steps.insert(steps.end()-1,movement);
+            if(scenario=="disconnect"||scenario=="loss"||scenario=="loss-no-neutral"||scenario=="reload-enable"||scenario=="main-only-loss") {
+                movement.at=scenario=="loss-no-neutral"?700u:150u;steps.insert(steps.end()-1,movement);
                 if(scenario=="loss"){Step neutral;neutral.at=130;steps.insert(steps.begin()+2,neutral);}
             }
         }
@@ -105,7 +105,7 @@ int main(int argc,char** argv){try{
         if(scenario=="default"||scenario=="malformed"||scenario=="input-rejected")CHECK(scroll_count==0);
         else if(scenario=="thumb-volume"){CHECK(scroll_count==0);CHECK(captured.size()==2&&captured[0].ki.wVk==VK_VOLUME_UP);}
         else if(scenario=="focus"||scenario=="pid"||scenario=="stop"||scenario=="reload")CHECK(total==72&&scroll_count==1);
-        else if(scenario=="disconnect"||scenario=="loss"||scenario=="main-only-loss")CHECK(total==192&&scroll_count>2);
+        else if(scenario=="disconnect"||scenario=="loss"||scenario=="loss-no-neutral"||scenario=="main-only-loss")CHECK(total==192&&scroll_count>2);
         else if(scenario=="invert"||scenario=="negative")CHECK(total==-120&&scroll_count>2);
         else if(scenario=="packet-resolution")CHECK(total==240&&scroll_count>2);
         else {CHECK(total==120);if(scenario=="nonbrowser"||scenario=="thumb-default")CHECK(scroll_count==1);else CHECK(scroll_count>2);}

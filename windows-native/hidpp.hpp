@@ -99,7 +99,7 @@ private:
     Byte software_id_{3};
     std::array<Byte, 20> input_{};
     std::array<Byte, 20> output_{};
-    std::array<Packet, 16> notifications_{};
+    std::array<Packet, 128> notifications_{};
     unsigned next_{}, queued_{};
     std::uint64_t lost_notifications_{}, pending_loss_{}, discarded_notifications_{};
     bool keep_notifications_{};

@@ -152,7 +152,7 @@ target_compile_options(logi-smooth-events-tests PRIVATE -ffunction-sections -fda
 target_link_options(logi-smooth-events-tests PRIVATE -static -Wl,--gc-sections)
 target_link_libraries(logi-smooth-events-tests PRIVATE user32 shell32 advapi32)
 foreach(case parser default browser main-only main-only-loss reload-enable nonbrowser invert negative packet-resolution malformed thumb thumb-default thumb-volume action preview input-rejected
-             focus pid stop disconnect reload loss health-repair acquire-verify foreign-target zero-capability restore-timeout restore-current-settings)
+             focus pid stop disconnect reload loss loss-no-neutral health-repair acquire-verify foreign-target zero-capability restore-timeout restore-current-settings)
     add_test(NAME smooth-events-${case} COMMAND logi-smooth-events-tests "${case}" "${CMAKE_CURRENT_BINARY_DIR}/smooth-${case}.ini")
     set_tests_properties(smooth-events-${case} PROPERTIES TIMEOUT 10 LABELS "isolated;smooth")
 endforeach()

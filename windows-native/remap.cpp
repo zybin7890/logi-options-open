@@ -1644,8 +1644,8 @@ bool check_reporting(logi::Mouse& mouse,std::vector<Control>& controls,std::opti
         if(current.packet.size<5)return failed("main-wheel",current);
         const auto mode=static_cast<logi::Byte>((current.packet.data()[0]&~1)|(main?1:0));
         if(current.packet.data()[0]!=mode) {
-            if(!mouse.channel->request(mouse.device.slot,mouse.wheel,2,{mode},300))return false;
-            current=mouse.channel->request(mouse.device.slot,mouse.wheel,1,{},300);
+            if(!mouse.channel->request(mouse.device.slot,mouse.wheel,2,{mode},1200))return false;
+            current=mouse.channel->request(mouse.device.slot,mouse.wheel,1,{},1200);
             if(!current || current.packet.size<5 || current.packet.data()[0]!=mode)return false;
             repaired=true;std::fputs("Recovered main wheel reporting.\n",stderr);
         }
@@ -1655,25 +1655,25 @@ bool check_reporting(logi::Mouse& mouse,std::vector<Control>& controls,std::opti
     for(auto& control:controls) {
         const auto high=logi::high(control.id),low=logi::low(control.id);
         const auto wanted=static_cast<logi::Byte>(control.xy?0x11:0x01);
-        auto current=mouse.channel->request(mouse.device.slot,mouse.buttons,2,{high,low},300);
+        auto current=mouse.channel->request(mouse.device.slot,mouse.buttons,2,{high,low},1200);
         if(!current || current.packet.size<7 || logi::word(current.packet.data())!=control.id)return failed("button",current,control.id);
         if((current.packet.data()[2]&0x11)==wanted)continue;
         mapping_readiness(false);
         const auto flags=static_cast<logi::Byte>(control.xy?0x33:0x23);
-        if(!mouse.channel->request(mouse.device.slot,mouse.buttons,3,{high,low,flags},300))return false;
-        current=mouse.channel->request(mouse.device.slot,mouse.buttons,2,{high,low},300);
+        if(!mouse.channel->request(mouse.device.slot,mouse.buttons,3,{high,low,flags},1200))return false;
+        current=mouse.channel->request(mouse.device.slot,mouse.buttons,2,{high,low},1200);
         if(!current || logi::word(current.packet.data())!=control.id || (current.packet.data()[2]&0x11)!=wanted)return false;
         cancel_gesture(control);repaired=true;
         std::fprintf(stderr,"Recovered reporting for control %04X.\n",control.id);
     }
     if(wheel) {
-        auto current=mouse.channel->request(mouse.device.slot,mouse.thumb,1,{},300);
+        auto current=mouse.channel->request(mouse.device.slot,mouse.thumb,1,{},1200);
         if(!current)return failed("thumb-wheel",current);
         const auto flags=static_cast<logi::Byte>(wheel->original[1]&~1u);
         if(current.packet.data()[0]!=1 || current.packet.data()[1]!=flags) {
             mapping_readiness(false);
-            if(!mouse.channel->request(mouse.device.slot,mouse.thumb,2,{1,flags},300))return false;
-            current=mouse.channel->request(mouse.device.slot,mouse.thumb,1,{},300);
+            if(!mouse.channel->request(mouse.device.slot,mouse.thumb,2,{1,flags},1200))return false;
+            current=mouse.channel->request(mouse.device.slot,mouse.thumb,1,{},1200);
             if(!current || current.packet.data()[0]!=1 || current.packet.data()[1]!=flags)return false;
             wheel->previous=nullptr;wheel->remainder=0;repaired=true;
             std::fputs("Recovered thumb wheel reporting.\n",stderr);
@@ -1985,7 +1985,7 @@ struct PeriodicHealth {
             stage=stage==Stage::main_write?Stage::main_read:stage==Stage::thumb_write?Stage::thumb_read:Stage::dpi_read;
             return Progress::pending;
         }
-        const auto begin=[&](logi::Byte feature,logi::Byte function,std::initializer_list<logi::Byte> parameters,DWORD timeout=300) {
+        const auto begin=[&](logi::Byte feature,logi::Byte function,std::initializer_list<logi::Byte> parameters,DWORD timeout=1200) {
             return mouse.channel->begin_control(mouse.device.slot,feature,function,parameters,timeout);
         };
         switch(stage) {
@@ -2111,6 +2111,7 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
     };
     PeriodicHealth periodic;
     bool retry_health{},repair_quarantine{},neutral_report{},sidecar_refresh_pending{};
+    ULONGLONG await_neutral_deadline{};
     auto next_check=GetTickCount64()+3000;
     const auto cancel_health=[&] {
         if(mouse.channel && !mouse.channel->cancel_control())return false;
@@ -2128,6 +2129,7 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         }
         if(wheel){wheel->previous=nullptr;wheel->remainder=0;}
         await_neutral=!controls.empty();repair_quarantine=true;mapping_readiness(false);
+        await_neutral_deadline=await_neutral?GetTickCount64()+500:0;
         if(controls.empty())next_check=GetTickCount64();
         std::fprintf(stderr,"Input notification loss: %llu; discarded=%llu. Actions cancelled; waiting for neutral buttons.\n",
             static_cast<unsigned long long>(lost),static_cast<unsigned long long>(mouse.channel->notification_discards()));
@@ -2137,9 +2139,18 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         mouse.channel->keep_notifications();
         mouse.channel->wake_on_command(dpi_commands?dpi_commands->wake():nullptr);
     }
+    const auto wall_ms=[] {
+        FILETIME ft{};
+        GetSystemTimeAsFileTime(&ft);
+        ULARGE_INTEGER ui{};
+        ui.LowPart=ft.dwLowDateTime;ui.HighPart=ft.dwHighDateTime;
+        return ui.QuadPart/10000ULL;
+    };
     ULONGLONG health_deferred_since{};
     ULONGLONG last_ui_check_ms{};
     ULONGLONG last_bat_check_ms{};
+    ULONGLONG last_device_activity_ms{};
+    ULONGLONG last_wall_ms=wall_ms();
     bool low_battery_notified{};
     auto ui_path = path ? ui_settings::file_path(path) : std::filesystem::path{};
     auto last_ui_stamp = std::filesystem::file_time_type::min();
@@ -2152,6 +2163,15 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
     for (;;) {
         if (WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0) {cancel_health();return EventExit::stopped;}
         const auto now_tick = GetTickCount64();
+        const auto now_wall = wall_ms();
+        if (now_wall > last_wall_ms && now_wall - last_wall_ms > 10000 && mouse.channel) {
+            for (auto& control : controls) cancel_gesture(control);
+            sequences.cancel();
+            retry_health = true;
+            next_check = now_tick;
+            if (await_neutral) neutral_report = true;
+        }
+        last_wall_ms = now_wall;
         if (path && now_tick - last_ui_check_ms >= 1000) {
             last_ui_check_ms = now_tick;
             std::error_code ec;
@@ -2204,8 +2224,11 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         if(sync_ready && sidecar_refresh_pending) {
             sidecar_refresh_pending=false;retry_health=true;next_check=GetTickCount64();
         }
+        if(await_neutral && !neutral_report && now_tick>=await_neutral_deadline) {
+            neutral_report=true;
+        }
         if(sync_ready && neutral_report) {
-            neutral_report=false;await_neutral=false;
+            neutral_report=false;await_neutral=false;await_neutral_deadline=0;
             if(!check_reporting(mouse,controls,wheel,main?&*main:nullptr)) {
                 if(cancel_notification_loss())continue;
                 mapping_readiness(false);return EventExit::restart;
@@ -2383,13 +2406,15 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         // A retired software-ID window can make begin_control busy without any I/O
         // outstanding; retain a timer wake even when the mouse sends no notifications.
         if(periodic.active() && !periodic.inflight)timeout=std::min<DWORD>(timeout,50);
+        if(await_neutral && !neutral_report){const auto now=GetTickCount64();timeout=std::min<DWORD>(timeout,static_cast<DWORD>(await_neutral_deadline>now?await_neutral_deadline-now:0));}
         if(mouse.channel && !periodic.active() && sync_ready){const auto now=GetTickCount64();timeout=std::min<DWORD>(timeout,static_cast<DWORD>(next_check>now?next_check-now:0));}
         if (!pending.empty() || daemon_ui().flow_enabled ||
             std::ranges::any_of(controls, [](const auto& c) { return c.brightness_repeat_due != 0; }))
             timeout = std::min<DWORD>(timeout, 16);
         if (sync_ready && mouse.channel && !await_neutral && !periodic.active() && !command_waiting &&
             !reload_waiting && !mouse_action_waiting) {
-            if (daemon_ui().notify_low_battery && mouse.battery && now_tick - last_bat_check_ms >= 60000 &&
+            if (daemon_ui().notify_low_battery && mouse.battery && last_device_activity_ms &&
+                now_tick - last_device_activity_ms < 120000 && now_tick - last_bat_check_ms >= 180000 &&
                 std::ranges::none_of(controls, [](const auto& c) { return c.down; })) {
                 last_bat_check_ms = now_tick;
                 if (const auto bat = mouse.request(mouse.battery, mouse.unified_battery ? 1 : 0);
@@ -2445,7 +2470,18 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         const bool reload_window=reload_window_packets!=0;
         if(reload_window)--reload_window_packets;
         const auto& packet = reply.packet;
+        if (packet.size == 7 && packet.bytes[0] == 0x10 && packet.bytes[1] == mouse.device.slot &&
+            packet.bytes[2] == 0x41) {
+            if (!(packet.bytes[4] & 0x40)) {
+                last_device_activity_ms = GetTickCount64();
+                retry_health = true;
+                next_check = last_device_activity_ms;
+                if (await_neutral) neutral_report = true;
+            }
+            continue;
+        }
         if (packet.size != 20 || packet.bytes[1] != mouse.device.slot) continue;
+        last_device_activity_ms = GetTickCount64();
         if(input_seen)*input_seen=true;
         // Observe sidecar changes made by older/external clients. Current GUI/CLI use
         // the owner command above, which cancels before writing the hardware.

@@ -166,18 +166,217 @@ def upright(back=False):
     return c.png()
 
 
+def _clamp(x, lo=0.0, hi=1.0):
+    return lo if x < lo else (hi if x > hi else x)
+
+
+def _smoothstep(e0, e1, x):
+    t = _clamp((x - e0) / (e1 - e0))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _mix_rgb(c1, c2, t):
+    return (c1[0] + (c2[0] - c1[0]) * t, c1[1] + (c2[1] - c1[1]) * t, c1[2] + (c2[2] - c1[2]) * t)
+
+
+def _blend(dst, src_rgb, src_a):
+    a = _clamp(src_a)
+    if a <= 0.0:
+        return dst
+    inv = 1.0 - a
+    out_a = a + dst[3] * inv
+    if out_a <= 1e-6:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (
+        (src_rgb[0] * a + dst[0] * dst[3] * inv) / out_a,
+        (src_rgb[1] * a + dst[1] * dst[3] * inv) / out_a,
+        (src_rgb[2] * a + dst[2] * dst[3] * inv) / out_a,
+        out_a,
+    )
+
+
+def _sd_squircle(px, py, r_box, power=4.4):
+    ax = abs(px) / r_box
+    ay = abs(py) / r_box
+    if ax < 1e-9 and ay < 1e-9:
+        return -r_box
+    return ((ax**power + ay**power) ** (1.0 / power) - 1.0) * r_box
+
+
+def _sd_round_box(px, py, bx, by, r):
+    qx = abs(px) - bx + r
+    qy = abs(py) - by + r
+    return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - r
+
+
+def _sd_capsule(px, py, ax, ay, bx, by, r):
+    pax, pay = px - ax, py - ay
+    bax, bay = bx - ax, by - ay
+    h = _clamp((pax * bax + pay * bay) / (bax * bax + bay * bay))
+    return math.hypot(pax - bax * h, pay - bay * h) - r
+
+
+def _render_project_master(W=512):
+    buf = bytearray(W * W * 4)
+    invW = 1.0 / W
+    aa = 1.4 / (W * 0.5)
+    cos_t, sin_t = math.cos(math.radians(-11)), math.sin(math.radians(-11))
+    hero = 1.0 / 1.10  # Slightly enlarged hero silhouette for crisp 16x16 tray & taskbar clarity.
+
+    for iy in range(W):
+        ny = (iy + 0.5) * invW * 2.0 - 1.0
+        for ix in range(W):
+            nx = (ix + 0.5) * invW * 2.0 - 1.0
+            col = (0.0, 0.0, 0.0, 0.0)
+
+            d_sh = _sd_squircle(nx, ny - 0.032, 0.90, 4.4)
+            sh_a = (1.0 - _smoothstep(-0.02, 0.082, d_sh)) * 0.38
+            col = _blend(col, (4, 8, 14), sh_a)
+
+            d_bg = _sd_squircle(nx, ny, 0.90, 4.4)
+            bg_mask = 1.0 - _smoothstep(-aa, aa, d_bg)
+            if bg_mask > 0.001:
+                rad = _clamp(math.hypot(nx * 0.85, (ny + 0.25) * 0.85))
+                diag = _clamp((nx * 0.4 + (ny + 1.0) * 0.5) * 0.7)
+                c_bg = _mix_rgb((28, 39, 54), (13, 18, 28), rad)
+                c_bg = _mix_rgb(c_bg, (10, 26, 36), (1.0 - diag) * 0.28)
+                glow_d = math.hypot(nx - 0.04, ny + 0.06)
+                c_bg = _mix_rgb(c_bg, (0, 210, 192), math.exp(-glow_d * glow_d * 4.2) * 0.26)
+                col = _blend(col, c_bg, bg_mask)
+
+                rim = _smoothstep(-0.032, -0.004, d_bg) * (1.0 - _smoothstep(-0.004, aa, d_bg))
+                rim_t = _clamp(0.55 - ny * 0.55)
+                col = _blend(col, _mix_rgb((36, 56, 74), (0, 218, 200), rim_t * 0.68), rim * bg_mask * 0.84)
+
+                hx, hy = nx * hero, (ny - 0.01) * hero
+                r_dist = math.hypot(hx, hy - 0.01)
+                ang = math.degrees(math.atan2(hy - 0.01, hx))
+                d_ring = abs(r_dist - 0.57) - 0.040
+                ring_a = 1.0 - _smoothstep(-aa, aa, d_ring)
+                in_main_arc = (-158.0 <= ang <= 26.0)
+                in_sub_arc = (106.0 <= ang <= 168.0)
+                if (in_main_arc or in_sub_arc) and ring_a > 0.001:
+                    if in_main_arc:
+                        t_cap = min(_smoothstep(-158.0, -142.0, ang), 1.0 - _smoothstep(10.0, 26.0, ang))
+                        grad_t = _clamp((ang + 158.0) / 184.0)
+                        col = _blend(col, _mix_rgb((0, 226, 202), (56, 189, 248), grad_t), ring_a * t_cap * 0.92)
+                    else:
+                        t_cap = min(_smoothstep(106.0, 118.0, ang), 1.0 - _smoothstep(156.0, 168.0, ang))
+                        col = _blend(col, (0, 188, 178), ring_a * t_cap * 0.50)
+
+                mx = (hx - 0.01) * cos_t - (hy - 0.01) * sin_t
+                my = (hx - 0.01) * sin_t + (hy - 0.01) * cos_t
+
+                y_norm = _clamp((my + 0.50) / 1.02)
+                half_w = 0.255 + 0.065 * math.sin(y_norm * math.pi) - 0.045 * (y_norm ** 2.2)
+                thumb_flare = 0.055 * math.exp(-((my - 0.08) / 0.26) ** 2) if mx < 0 else 0.0
+                left_edge = -(half_w + thumb_flare)
+                right_edge = half_w - 0.015 * y_norm
+                cx_m = 0.5 * (left_edge + right_edge)
+                bx_m = 0.5 * (right_edge - left_edge)
+                rx_m = bx_m * 0.96
+                d_body = _sd_round_box(mx - cx_m, my, bx_m, 0.51, min(rx_m, 0.25))
+
+                d_msh = _sd_round_box(mx - cx_m - 0.02, my - 0.04, bx_m + 0.02, 0.52, min(rx_m, 0.25))
+                col = _blend(col, (4, 8, 12), (1.0 - _smoothstep(-0.02, 0.08, d_msh)) * 0.52)
+
+                body_a = 1.0 - _smoothstep(-aa, aa, d_body)
+                if body_a > 0.001:
+                    dome = _clamp(1.0 - ((mx / 0.34) ** 2 * 0.55 + ((my + 0.10) / 0.55) ** 2 * 0.65))
+                    is_upper = my < -0.02 + 0.05 * (mx / 0.28) ** 2
+                    base_c = _mix_rgb((33, 41, 51), (78, 92, 108), dome * (0.85 if is_upper else 0.60))
+                    spec = math.exp(-((mx + 0.08) / 0.14) ** 2 - ((my + 0.24) / 0.22) ** 2) * 0.22
+                    base_c = _mix_rgb(base_c, (200, 224, 240), spec)
+                    col = _blend(col, base_c, body_a)
+
+                    if my < -0.02:
+                        d_seam_v = abs(mx) - 0.008
+                        seam_a = (1.0 - _smoothstep(-aa, aa, d_seam_v)) * _smoothstep(-0.48, -0.42, my)
+                        col = _blend(col, (14, 19, 25), seam_a * 0.85 * body_a)
+                    d_seam_h = abs(my + 0.02 - 0.045 * (mx / 0.28) ** 2) - 0.007
+                    col = _blend(col, (16, 22, 29), (1.0 - _smoothstep(-aa, aa, d_seam_h)) * 0.72 * body_a)
+
+                    m_rim = 1.0 - _smoothstep(0.0, 0.021, abs(d_body))
+                    col = _blend(col, (0, 214, 196), m_rim * 0.90 * bg_mask)
+
+                    d_sb1 = _sd_capsule(mx, my, -0.275, -0.14, -0.285, -0.02, 0.015)
+                    d_sb2 = _sd_capsule(mx, my, -0.285, 0.04, -0.270, 0.16, 0.015)
+                    sb_a = max(1.0 - _smoothstep(-aa, aa, d_sb1), 1.0 - _smoothstep(-aa, aa, d_sb2))
+                    col = _blend(col, (150, 174, 188), sb_a * 0.78 * body_a)
+
+                    d_well = _sd_round_box(mx, my + 0.225, 0.056, 0.145, 0.054)
+                    col = _blend(col, (12, 16, 22), 1.0 - _smoothstep(-aa, aa, d_well))
+
+                    d_wheel = _sd_round_box(mx, my + 0.225, 0.036, 0.122, 0.034)
+                    wheel_a = 1.0 - _smoothstep(-aa, aa, d_wheel)
+                    if wheel_a > 0.001:
+                        w_shade = _clamp(1.0 - abs(mx / 0.036) * 0.55)
+                        notch = 0.5 + 0.5 * math.cos((my + 0.225) * 210.0)
+                        wc = _mix_rgb((138, 152, 165), (238, 246, 252), w_shade * (0.72 + 0.28 * notch))
+                        col = _blend(col, wc, wheel_a)
+
+                    d_btn = _sd_round_box(mx, my + 0.015, 0.024, 0.042, 0.022)
+                    col = _blend(col, (15, 21, 28), 1.0 - _smoothstep(-aa, aa, d_btn))
+                    d_dot = math.hypot(mx, my - 0.16) - 0.035
+                    col = _blend(col, (0, 234, 214), 1.0 - _smoothstep(-aa, aa, d_dot))
+                    d_hi = math.hypot(mx + 0.009, my - 0.151) - 0.011
+                    col = _blend(col, (218, 255, 250), (1.0 - _smoothstep(-aa, aa, d_hi)) * 0.78)
+
+            idx = (iy * W + ix) * 4
+            buf[idx] = int(_clamp(col[0], 0, 255) + 0.5)
+            buf[idx + 1] = int(_clamp(col[1], 0, 255) + 0.5)
+            buf[idx + 2] = int(_clamp(col[2], 0, 255) + 0.5)
+            buf[idx + 3] = int(_clamp(col[3] * 255.0, 0, 255) + 0.5)
+    return buf
+
+
+def _encode_rgba_png(w, h, buf):
+    rows = [b"\0" + bytes(buf[y * w * 4:(y + 1) * w * 4]) for y in range(h)]
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b""))
+
+
+def _downsample_rgba(src, W, S):
+    if W == S:
+        return src
+    out = bytearray(S * S * 4)
+    for y in range(S):
+        sy0 = (y * W) // S
+        sy1 = max(sy0 + 1, ((y + 1) * W) // S)
+        for x in range(S):
+            sx0 = (x * W) // S
+            sx1 = max(sx0 + 1, ((x + 1) * W) // S)
+            r = g = b = a = 0.0
+            cnt = 0
+            for sy in range(sy0, sy1):
+                for sx in range(sx0, sx1):
+                    i = (sy * W + sx) * 4
+                    pa = src[i + 3]
+                    r += src[i] * pa
+                    g += src[i + 1] * pa
+                    b += src[i + 2] * pa
+                    a += pa
+                    cnt += 1
+            oi = (y * S + x) * 4
+            if a > 0.5:
+                out[oi] = min(255, int(r / a + 0.5))
+                out[oi + 1] = min(255, int(g / a + 0.5))
+                out[oi + 2] = min(255, int(b / a + 0.5))
+                out[oi + 3] = min(255, int(a / cnt + 0.5))
+    return out
+
+
+_PROJECT_MASTER = None
+
+
 def app_icon(kind, size=256):
-    c = Canvas(size, size)
-    s = size / 256
+    global _PROJECT_MASTER
     if kind == "project":
-        c.pill(8*s, 8*s, 240*s, 240*s, DARK)
-        c.pill(70*s, 40*s, 116*s, 176*s, ACCENT)
-        c.pill(77*s, 47*s, 102*s, 162*s, DARK)
-        c.line((128*s, 47*s), (128*s, 113*s), ACCENT, 7*s)
-        c.pill(121*s, 67*s, 14*s, 28*s, SILVER)
-        c.line((77*s, 116*s), (179*s, 116*s), ACCENT, 6*s)
-        c.ellipse((121*s, 171*s, 14*s, 14*s), ACCENT)
-    else:
+        if _PROJECT_MASTER is None:
+            _PROJECT_MASTER = _render_project_master(512)
+        return _encode_rgba_png(size, size, _downsample_rgba(_PROJECT_MASTER, 512, size))
+    c = Canvas(size, size)
+    if True:
         color = {"firefox": (86, 103, 219), "chrome": (33, 146, 143), "wps": (186, 92, 88)}[kind]
         c.pill(12, 12, 232, 232, color)
         if kind == "wps":
