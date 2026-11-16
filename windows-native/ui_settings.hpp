@@ -263,9 +263,8 @@ inline bool set_windows_autostart(bool enable, const std::filesystem::path& exe_
     if (open_rc != ERROR_SUCCESS || !key) return false;
     LONG rc = ERROR_SUCCESS;
     if (enable) {
-        const auto cli = (exe_dir / L"logi-cli.exe").wstring();
-        const auto ini = (exe_dir / L"mappings.ini").wstring();
-        const std::wstring cmd = L"\"" + cli + L"\" run \"" + ini + L"\"";
+        const auto gui = (exe_dir / L"logi-native.exe").wstring();
+        const std::wstring cmd = L"\"" + gui + L"\" --tray";
         rc = RegSetValueExW(key, L"LogiNative", 0, REG_SZ,
                             reinterpret_cast<const BYTE*>(cmd.c_str()),
                             static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));

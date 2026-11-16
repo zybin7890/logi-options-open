@@ -2759,7 +2759,7 @@ public:
         startup.dwFlags = STARTF_USESHOWWINDOW;
         startup.wShowWindow = SW_HIDE;
         PROCESS_INFORMATION process{};
-        if (CreateProcessW(restart_.c_str(), nullptr, nullptr, nullptr, FALSE, 0, nullptr,
+        if (CreateProcessW(restart_.c_str(), nullptr, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
                            restart_.parent_path().c_str(), &startup, &process)) {
             CloseHandle(process.hThread);
             CloseHandle(process.hProcess);

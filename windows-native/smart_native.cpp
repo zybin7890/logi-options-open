@@ -3460,27 +3460,13 @@ void preview(Editor& editor) {
         hint(editor, L"当前动作无法试运行。");
         return;
     }
-    const auto exe = editor.directory / L"logi-cli.exe";
-    auto command = L"\"" + exe.wstring() + L"\" play-actions \"" + path.wstring() + L"\"";
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                        nullptr, editor.directory.c_str(), &startup, &process)) {
-        DeleteFileW(path.c_str());
-        hint(editor, L"未能启动试运行。");
-        return;
-    }
-    CloseHandle(process.hThread);
     editor.preview_result = std::make_shared<PreviewResult>();
     const auto result = editor.preview_result;
-    std::thread([handle = process.hProcess, path, result] {
-        WaitForSingleObject(handle, INFINITE);
-        DWORD exit_code = 3;
-        GetExitCodeProcess(handle, &exit_code);
-        CloseHandle(handle);
+    std::thread([path, result] {
+        Sleep(3000);
+        const int exit_code = play_actions(path.c_str(), false);
         DeleteFileW(path.c_str());
-        result->exit_code.store(exit_code);
+        result->exit_code.store(static_cast<DWORD>(exit_code));
     }).detach();
     SetTimer(editor.window, preview_timer, 100, nullptr);
     EnableWindow(GetDlgItem(editor.window, preview_id), FALSE);

@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cwchar>
 #include <cmath>
 #include <filesystem>
@@ -519,7 +520,13 @@ struct App {
     bool force_exit{};
     HICON tray_hicon{};
     UINT taskbar_created_msg{};
+    std::thread agent_thread;
+    std::atomic<bool> agent_thread_running{};
     ~App() {
+        if (agent_thread.joinable()) {
+            stop_agent();
+            agent_thread.join();
+        }
         if (reload_cancel) SetEvent(reload_cancel);
         if (reload_worker.joinable()) reload_worker.join();
         if (reload_cancel) CloseHandle(reload_cancel);
@@ -1518,66 +1525,60 @@ void sync_dpi_control(App& app) {
     app.rendering=was_rendering;
 }
 void start_agent(App& app) {
+    if (app.agent_thread.joinable() && !app.agent_thread_running.load()) app.agent_thread.join();
     update_agents(app);
     if (app.waiting_agent) return;
-    const auto monitor=[&](HANDLE process) {
-        if(app.started)CloseHandle(app.started);
-        app.started=process;app.waiting_agent=true;app.waiting_stop=false;app.timer_checks=0;
-        SetTimer(app.window,1,50,nullptr);
-        notice(app,L"正在接管鼠标…");app.startup_notice_revision=app.notice_revision;
+    const auto begin_wait = [&](HANDLE process) {
+        if (app.started) { CloseHandle(app.started); app.started = nullptr; }
+        app.started = process;
+        app.waiting_agent = true;
+        app.waiting_stop = false;
+        app.timer_checks = 0;
+        SetTimer(app.window, 1, 50, nullptr);
+        notice(app, L"正在接管鼠标…");
+        app.startup_notice_revision = app.notice_revision;
     };
-    if(app.native) {
+    if (app.native) {
         if (!options_running()) {
-            const auto status=read_agent_status();
-            if(status.available && !status.mappings_ready)
-                if(const auto process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,status.pid))monitor(process);
+            const auto status = read_agent_status();
+            if (status.available && !status.mappings_ready) {
+                if (app.agent_thread_running.load() && status.pid == GetCurrentProcessId()) {
+                    begin_wait(nullptr);
+                } else if (const auto process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, status.pid)) {
+                    begin_wait(process);
+                }
+            }
             return;
         }
-        // Reconcile native + official dual-agent conflict by cleanly cycling to run-preview takeover.
-        const auto exe = app.directory / L"logi-cli.exe";
-        auto stop_cmd = L"\"" + exe.wstring() + L"\" stop";
-        STARTUPINFOW si{}; si.cb = sizeof(si);
-        PROCESS_INFORMATION pi{};
-        if (CreateProcessW(exe.c_str(), stop_cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                           nullptr, app.directory.c_str(), &si, &pi)) {
-            WaitForSingleObject(pi.hProcess, 2500);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-        }
+        // Reconcile native + official dual-agent conflict completely in-process.
+        stop_agent();
+        for (int i = 0; i < 50 && agent_running(); ++i) Sleep(50);
+        if (app.agent_thread.joinable() && !app.agent_thread_running.load()) app.agent_thread.join();
         update_agents(app);
         if (app.native) return;
     }
-    if (!check_mappings(app.mapping().c_str())) { notice(app,L"配置无效，请先检查按键设置。"); return; }
-    const auto exe=app.directory/L"logi-cli.exe";
-    auto command=L"\"" + exe.wstring() + L"\" run-preview \"" + app.mapping().wstring() + L"\"";
-    SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};
-    const auto output=CreateFileW((app.directory/L"agent.log").c_str(),GENERIC_WRITE,FILE_SHARE_READ,
-                                  &security,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
-    const auto input=CreateFileW(L"NUL",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,&security,
-                                 OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
-    STARTUPINFOW startup{};
-    startup.cb=sizeof(startup);
-    startup.dwFlags=STARTF_USESTDHANDLES;
-    startup.hStdInput=input;
-    startup.hStdOutput=startup.hStdError=output;
-    PROCESS_INFORMATION process{};
-    const bool started=output!=INVALID_HANDLE_VALUE && input!=INVALID_HANDLE_VALUE &&
-        CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,
-                       app.directory.c_str(),&startup,&process);
-    if (input!=INVALID_HANDLE_VALUE) CloseHandle(input);
-    if (output!=INVALID_HANDLE_VALUE) CloseHandle(output);
-    if (!started) { notice(app,L"无法启动后台。请检查 logi-cli.exe 是否在同目录。"); return; }
-    CloseHandle(process.hThread);
-    monitor(process.hProcess);
+    if (!check_mappings(app.mapping().c_str())) { notice(app, L"配置无效，请先检查按键设置。"); return; }
+    if (app.agent_thread.joinable()) {
+        if (app.agent_thread_running.load()) return;
+        app.agent_thread.join();
+    }
+    app.agent_thread_running.store(true);
+    begin_wait(nullptr);
+    const auto map_path = app.mapping();
+    app.agent_thread = std::thread([&app, map_path] {
+        run_agent(map_path.c_str(), true);
+        app.agent_thread_running.store(false);
+    });
 }
 
 bool check_agent_startup(App& app,bool timeout) {
     if (!app.waiting_agent) return false;
-    const bool exited=app.started && WaitForSingleObject(app.started,0)==WAIT_OBJECT_0;
-    const DWORD started_pid=app.started?GetProcessId(app.started):0;
-    const auto status=read_agent_status();
-    const bool same_process=status.available && started_pid && status.pid==started_pid;
-    const bool mappings_ready=same_process && !exited && app.native && status.mappings_ready;
+    const bool external = app.started != nullptr;
+    const bool exited = external ? (WaitForSingleObject(app.started, 0) == WAIT_OBJECT_0) : !app.agent_thread_running.load();
+    const DWORD started_pid = external ? GetProcessId(app.started) : GetCurrentProcessId();
+    const auto status = read_agent_status();
+    const bool same_process = status.available && started_pid && status.pid == started_pid;
+    const bool mappings_ready = same_process && !exited && app.native && status.mappings_ready;
     if (!mappings_ready && !exited && !timeout) return false;
     KillTimer(app.window,1);
     app.waiting_agent=false;
