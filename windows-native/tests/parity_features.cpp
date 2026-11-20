@@ -174,13 +174,26 @@ int main() {
         // After 300ms cooldown, another horizontal step fires
         const auto second = preset.move(-75, 0, 1400, 70, 55);
         assert(second && *second == 1);
+
+        // AppNav, WindowManagement, ArrangeWindows also enforce direction locking
+        for (const auto kind : {pointer_gesture::PresetKind::app_nav,
+                                pointer_gesture::PresetKind::window_management,
+                                pointer_gesture::PresetKind::arrange_windows}) {
+            preset.start(kind);
+            assert(preset.direction_locked());
+            const auto h = preset.move(90, 5, 2000, 70, 55);
+            assert(h && *h == 2);
+            assert(!preset.move(0, 120, 2400, 70, 55).has_value());
+        }
     }
 
-    // 6. remap.cpp parser for new official parity actions
+    // 6. remap.cpp parser for new official parity actions & universal smooth scroll
     {
         Mappings m;
         assert(parse_text(
             "[global]\n"
+            "scroll.smooth=1\n"
+            "scroll.smooth.all=1\n"
             "0052=DateTime(datetime)\n"
             "0053=Widget(spotlight)\n"
             "0056=HostSwitch(2)\n"
@@ -189,6 +202,11 @@ int main() {
             "thumb.left=RotateLeft\n"
             "thumb.right=RotateRight\n",
             m));
+        assert(m.scroll_smooth && *m.scroll_smooth);
+        assert(m.scroll_smooth_all && *m.scroll_smooth_all);
+        assert(ScrollOutput::browser(L"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"));
+        assert(ScrollOutput::browser(L"C:\\Apps\\Arc\\arc.exe"));
+        assert(!ScrollOutput::browser(L"C:\\Windows\\notepad.exe"));
         assert(m.bindings.size() == 7);
         assert(m.bindings[0].actions[0].operation == Operation::date_time);
         assert(m.bindings[0].actions[0].text == L"datetime");

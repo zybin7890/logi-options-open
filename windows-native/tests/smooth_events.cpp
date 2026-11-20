@@ -78,6 +78,15 @@ int main(int argc,char** argv){try{
         else if(scenario=="negative"){steps[0].wheel_delta=-8;}
         else if(scenario=="malformed"){steps[0].wheel_flags=0x91;}
         else if(scenario=="input-rejected"){input_result=[](UINT,LPINPUT){return 0u;};}
+        else if(scenario=="input-recovery"||scenario=="input-recovery-direct") {
+            // Rejection by a privileged foreground must not release the device.
+            // A fresh side-button press and wheel movement must work on return.
+            if(scenario=="input-recovery-direct")fixture_app_name=L"C:\\Apps\\notepad.exe";
+            input_result=[](UINT count,LPINPUT){return tick<200?0u:count;};
+            Step press;press.at=250;press.down=true;
+            Step release;release.at=260;
+            movement.at=300;steps={steps.front(),press,release,movement,end};
+        }
         else if(scenario=="focus"||scenario=="pid"||scenario=="stop"||scenario=="disconnect"||scenario=="reload"||scenario=="reload-enable"||scenario=="loss"||scenario=="loss-no-neutral"||scenario=="main-only-loss") {
             Step cancel;cancel.at=115;cancel.idle=scenario=="focus"||scenario=="pid"||scenario=="reload"||scenario=="reload-enable";
             cancel.app=scenario=="focus"?2:0;cancel.stop=scenario=="stop";cancel.disconnect=scenario=="disconnect";cancel.loss=scenario=="loss"||scenario=="loss-no-neutral"||scenario=="main-only-loss";
@@ -108,7 +117,7 @@ int main(int argc,char** argv){try{
         else if(scenario=="disconnect"||scenario=="loss"||scenario=="loss-no-neutral"||scenario=="main-only-loss")CHECK(total==192&&scroll_count>2);
         else if(scenario=="invert"||scenario=="negative")CHECK(total==-120&&scroll_count>2);
         else if(scenario=="packet-resolution")CHECK(total==240&&scroll_count>2);
-        else {CHECK(total==120);if(scenario=="nonbrowser"||scenario=="thumb-default")CHECK(scroll_count==1);else CHECK(scroll_count>2);}
+        else {CHECK(total==120);if(scenario=="nonbrowser"||scenario=="thumb-default"||scenario=="input-recovery-direct")CHECK(scroll_count==1);else CHECK(scroll_count>2);}
         if(scenario=="default"||thumb)CHECK(mode_writes.empty());
         else {
             CHECK(!mode_writes.empty()&&!(mode_writes.back()&1));CHECK(mode_reads>=3);
@@ -118,7 +127,18 @@ int main(int argc,char** argv){try{
             CHECK(capture_times.front()==110);for(std::size_t i=1;i<capture_times.size();++i)CHECK(capture_times[i]-capture_times[i-1]>=10);
         }
         if(scenario=="disconnect")CHECK(connects==2&&std::ranges::count(mode_writes,2u)==1);
-        if(scenario=="input-rejected")CHECK(connects==2&&std::ranges::count(mode_writes,2u)==2&&control_restores==2);
+        if(scenario=="input-rejected"||scenario=="input-recovery"||scenario=="input-recovery-direct") {
+            CHECK(connects==1&&std::ranges::count(mode_writes,2u)==1&&control_restores==1);
+            CHECK(observed_ready==1&&observed_mappings==1);
+            if(scenario!="input-rejected") {
+                unsigned key_count{};
+                for(std::size_t i=0;i<captured.size();++i) {
+                    CHECK(capture_times[i]>=250);
+                    if(captured[i].type==INPUT_KEYBOARD){CHECK(captured[i].ki.wVk=='A');++key_count;}
+                }
+                CHECK(key_count==2);
+            }
+        }
         if(scenario=="reload")CHECK(connects==1&&std::ranges::count(mode_writes,3u)==1);
         if(scenario=="reload-enable")CHECK(connects==1&&std::ranges::count(mode_writes,3u)==1&&capture_times.front()==160);
         if(scenario=="health-repair")CHECK(std::ranges::count(mode_writes,3u)==2&&async_begins>0&&capture_times.front()==3310);

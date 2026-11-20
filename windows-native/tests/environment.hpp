@@ -17,6 +17,7 @@
 static bool stopped,restore_ok;
 static std::atomic<unsigned> foreground_app{1};
 static std::function<void(unsigned)> before_step;
+static std::function<void()> observe_lastinput;
 static std::function<unsigned(UINT,LPINPUT)> input_result;
 static std::function<void(DWORD)> after_sleep;
 static std::function<void(HANDLE,DWORD)> observe_wait;
@@ -83,7 +84,7 @@ BOOL WINAPI fake_handler(PHANDLER_ROUTINE,BOOL){return TRUE;}
 DWORD WINAPI fake_wait(HANDLE h,DWORD duration){if(observe_wait)observe_wait(h,duration);if(h==reinterpret_cast<HANDLE>(11))return WAIT_OBJECT_0;if(h==reinterpret_cast<HANDLE>(102)&&reload_signal)return WAIT_OBJECT_0;return h==reinterpret_cast<HANDLE>(101)&&stopped?WAIT_OBJECT_0:WAIT_TIMEOUT;}
 BOOL WINAPI fake_release_mutex(HANDLE){return TRUE;}
 ULONGLONG WINAPI fake_clock(){return tick;}
-BOOL WINAPI fake_lastinput(PLASTINPUTINFO input){input->dwTime=mode=="idle-resume"?input_stamp:static_cast<DWORD>(tick);return TRUE;}
+BOOL WINAPI fake_lastinput(PLASTINPUTINFO input){if(observe_lastinput)observe_lastinput();input->dwTime=mode=="idle-resume"?input_stamp:static_cast<DWORD>(tick);return TRUE;}
 BOOL WINAPI fake_peek(LPMSG,HWND,UINT,UINT,UINT){return FALSE;}
 UINT WINAPI fake_input(UINT n,LPINPUT input,int){const auto accepted=input_result?input_result(n,input):n;CHECK(accepted<=n);captured.insert(captured.end(),input,input+accepted);for(unsigned i=0;i<accepted;++i)capture_times.push_back(tick);return accepted;}
 HWND WINAPI fake_foreground(){return reinterpret_cast<HWND>(static_cast<uintptr_t>(foreground_app));}
@@ -177,7 +178,7 @@ Reply Channel::read(DWORD timeout,bool,HANDLE){
  if(control_active_&&cancel_delayed&&tick<async_due){CHECK(timeout!=0);++nonzero_cancel_waits;tick=async_due;return {Result::control};}
  if(control_active_&&input_index<steps.size()&&steps[input_index].at>=async_due&&steps[input_index].at!=0){tick=async_due;return {Result::control};}
  if(control_active_ && (tick>=async_due || input_index>=steps.size())){tick=std::max(tick,async_due);return {Result::control};}
- ++read_calls;CHECK(health);observed_ready=health->ready;observed_mappings=health->mappings_ready;observed_settings=health->settings_ready;
+  ++read_calls;CHECK(health);if(mode=="ready-publication")CHECK(keep_notifications_);observed_ready=health->ready;observed_mappings=health->mappings_ready;observed_settings=health->settings_ready;
  observed_checked=health->checked;observed_failures=health->failures;observed_connections=health->connections;last_pid=health->pid;
  if(mode=="reconnect" && read_calls==1){first_pid=health->pid;return {Result::io_error};}
  if(mode=="idle-resume") {
@@ -273,7 +274,7 @@ Result Channel::send(Byte,Byte,Byte,std::initializer_list<Byte>,DWORD) {
  if(mode=="owner-window-released"||mode=="reload-window-released")push(false,false,0);
  return Result::ok;
 }
-std::optional<Mouse> connect(HANDLE,bool){++connects;if(accept_connection&&!accept_connection(connects))return {};if(mode.starts_with("reload-")&&connects==2){CHECK(health&&health->mappings_ready==0);reload_failed_ready=true;report_button=0;}if(mode=="reconnect" && connects==2)CHECK(health && health->ready==0 && health->mappings_ready==0 && health->pid==first_pid);Mouse m{};m.device={1,2,0,"MX Master 3S"};m.buttons=7;m.dpi=9;if(mode=="async-wheel-cancel"||mode=="async-past-wheel")m.shift=8;if(mode=="async-repair-thumb")m.thumb=6;m.dpi_choices={1000,5000};m.channel=std::make_unique<Channel>(Interface{});if(configure_mouse)configure_mouse(m);return m;}
+std::optional<Mouse> connect(HANDLE,bool,bool){++connects;if(accept_connection&&!accept_connection(connects))return {};if(mode.starts_with("reload-")&&connects==2){CHECK(health&&health->mappings_ready==0);reload_failed_ready=true;report_button=0;}if(mode=="reconnect" && connects==2)CHECK(health && health->ready==0 && health->mappings_ready==0 && health->pid==first_pid);Mouse m{};m.device={1,2,0,"MX Master 3S"};m.buttons=7;m.dpi=9;if(mode=="async-wheel-cancel"||mode=="async-past-wheel")m.shift=8;if(mode=="async-repair-thumb")m.thumb=6;m.dpi_choices={1000,5000};m.channel=std::make_unique<Channel>(Interface{});if(configure_mouse)configure_mouse(m);return m;}
 bool restore_standard_input(Mouse&){return true;}
 #ifndef LOGI_TEST_SETTINGS_SNAPSHOT
 bool switch_host(Mouse&,unsigned){return true;}

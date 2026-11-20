@@ -9,21 +9,19 @@ if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/mappings.ini")
     configure_file(../default-windows.ini mappings.ini COPYONLY)
 endif()
 configure_file(../bridge.py bridge.py COPYONLY)
+foreach(asset side.png front.png back.png loginative.ico firefox.png chrome.png wps.png)
+    configure_file("../assets/${asset}" "assets/${asset}" COPYONLY)
+endforeach()
 
 add_library(logi-core STATIC hidpp.cpp mouse.cpp remap.cpp ring.cpp system_actions.cpp screen_capture.cpp notifications_hud.cpp flow.cpp pairing.cpp)
 target_link_libraries(logi-core PUBLIC setupapi hid shell32 advapi32 ole32 oleaut32 uuid wbemuuid dxva2 powrprof gdiplus dwmapi ws2_32 bcrypt)
 
-add_executable(logi-cli main.cpp)
-target_link_libraries(logi-cli PRIVATE logi-core)
-foreach(asset side.png front.png back.png loginative.ico firefox.png chrome.png wps.png)
-    configure_file("../assets/${asset}" "assets/${asset}" COPYONLY)
-endforeach()
-add_executable(logi-native WIN32 native.cpp smart_native.cpp assets.rc)
+add_executable(logi-native WIN32 native.cpp smart_native.cpp main.cpp assets.rc)
 target_compile_definitions(logi-native PRIVATE NTDDI_VERSION=0x0A000003)
 target_include_directories(logi-native PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/..>")
-target_link_libraries(logi-native PRIVATE logi-core comctl32 comdlg32 gdiplus dwrite ole32 dwmapi shlwapi uxtheme d2d1 d3d11)
+target_link_libraries(logi-native PRIVATE logi-core ole32 dwmapi shlwapi)
 
-foreach(target logi-core logi-cli logi-native)
+foreach(target logi-core logi-native)
     set_target_properties(${target} PROPERTIES
         CXX_STANDARD 26
         CXX_STANDARD_REQUIRED YES

@@ -206,7 +206,7 @@ struct Mappings {
     ring_metadata::Settings ring_ui;
     std::vector<Hotkey> hotkeys;
     std::optional<unsigned> thumb_speed;
-    std::optional<bool> scroll_smooth,thumb_smooth;
+    std::optional<bool> scroll_smooth,scroll_smooth_all,thumb_smooth;
 };
 
 bool valid_media_bindings(const std::vector<Binding>& bindings);
@@ -678,8 +678,9 @@ bool add_rule(std::wstring_view line, const std::wstring& section, Mappings& map
     const auto equals = line.find(L'=');
     if(equals!=line.npos) {
         const auto key=trim(line.substr(0,equals));
-        if(key==L"scroll.smooth"||key==L"thumb.smooth") {
-            auto& option=key==L"scroll.smooth"?mappings.scroll_smooth:mappings.thumb_smooth;
+        if(key==L"scroll.smooth"||key==L"scroll.smooth.all"||key==L"thumb.smooth") {
+            auto& option=key==L"scroll.smooth"?mappings.scroll_smooth:
+                key==L"scroll.smooth.all"?mappings.scroll_smooth_all:mappings.thumb_smooth;
             const auto value=trim(line.substr(equals+1));
             if(!section.empty()||option.has_value()||(value!=L"0"&&value!=L"1"))return false;
             option=value==L"1";return true;
@@ -875,12 +876,16 @@ bool scroll(int horizontal, int vertical) {
 struct ScrollOutput {
     struct Axis {smooth_scroll::Axis filter;std::optional<InputContext> owner;};
     std::array<Axis,2> axes;
-    bool rejected{};
     bool active()const{return std::ranges::any_of(axes,[](const auto& axis){return axis.filter.active();});}
     static bool browser(std::wstring_view path) {
         const auto name=std::filesystem::path(path).filename().wstring();
         return _wcsicmp(name.c_str(),L"chrome.exe")==0||_wcsicmp(name.c_str(),L"msedge.exe")==0||
-            _wcsicmp(name.c_str(),L"firefox.exe")==0||_wcsicmp(name.c_str(),L"iexplore.exe")==0;
+            _wcsicmp(name.c_str(),L"firefox.exe")==0||_wcsicmp(name.c_str(),L"iexplore.exe")==0||
+            _wcsicmp(name.c_str(),L"brave.exe")==0||_wcsicmp(name.c_str(),L"arc.exe")==0||
+            _wcsicmp(name.c_str(),L"vivaldi.exe")==0||_wcsicmp(name.c_str(),L"opera.exe")==0||
+            _wcsicmp(name.c_str(),L"floorp.exe")==0||_wcsicmp(name.c_str(),L"zen.exe")==0||
+            _wcsicmp(name.c_str(),L"thorium.exe")==0||_wcsicmp(name.c_str(),L"waterfox.exe")==0||
+            _wcsicmp(name.c_str(),L"librewolf.exe")==0||_wcsicmp(name.c_str(),L"360chrome.exe")==0;
     }
     void cancel(){axes={};}
     void cancel(unsigned axis){axes[axis]={};}
@@ -889,14 +894,14 @@ struct ScrollOutput {
         INPUT input{};input.type=INPUT_MOUSE;input.mi.dwFlags=axis?MOUSEEVENTF_WHEEL:MOUSEEVENTF_HWHEEL;
         input.mi.mouseData=static_cast<DWORD>(units);
         if(send_input(1,&input,sizeof(input))==1)return true;
-        rejected=true;cancel(axis);std::fputs("Windows rejected smooth scroll input.\n",stderr);return false;
+        cancel(axis);std::fputs("Windows rejected smooth scroll input.\n",stderr);return false;
     }
-    bool feed(unsigned index,double units,const InputContext& owner) {
+    bool feed(unsigned index,double units,const InputContext& owner,bool smooth_all=false) {
         auto& axis=axes[index];
         if(!owner.current()){cancel(index);return false;}
         if(!axis.owner||axis.owner->window!=owner.window||axis.owner->pid!=owner.pid)axis={};
         axis.owner=owner;
-        return emit(index,axis.filter.feed(units,GetTickCount64(),browser(owner.application)));
+        return emit(index,axis.filter.feed(units,GetTickCount64(),smooth_all||browser(owner.application)));
     }
     DWORD service(bool& failed) {
         DWORD delay=INFINITE;const auto now=GetTickCount64();
@@ -1825,7 +1830,7 @@ struct PeriodicHealth {
     enum class Progress { pending,complete,failed,unavailable };
     Stage stage{Stage::idle};
     std::size_t index{};
-    bool inflight{},repaired{},settings_valid{true},save_target{};
+    bool inflight{},repaired{},settings_valid{true},save_target{},read_timeout_retried{};
     logi::Byte main_mode{},thumb_mode{},thumb_flags{},shift_mode{},shift_threshold{};
     bool parameters_allowed{true};
     std::optional<unsigned> target;
@@ -1875,6 +1880,18 @@ struct PeriodicHealth {
             const auto completed=mouse.channel->poll_control();
             if(!completed)return Progress::pending;
             inflight=false;const auto& reply=*completed;
+            const bool read_stage=stage==Stage::main_read || stage==Stage::main_verify ||
+                stage==Stage::button_read || stage==Stage::button_verify ||
+                stage==Stage::thumb_read || stage==Stage::thumb_verify ||
+                stage==Stage::shift_read || stage==Stage::shift_verify ||
+                stage==Stage::dpi_read || stage==Stage::dpi_verify;
+            if(reply.result==logi::Result::timeout && read_stage && !read_timeout_retried) {
+                // A missed wireless reply does not imply broken input reporting.
+                // Retry this read once asynchronously; Channel quarantines the old
+                // software ID, and normal input/owner commands remain serviceable.
+                read_timeout_retried=true;return Progress::pending;
+            }
+            read_timeout_retried=false;
             const bool dpi_stage=stage==Stage::dpi_read || stage==Stage::dpi_write || stage==Stage::dpi_verify;
             const bool shift_stage=stage==Stage::shift_read || stage==Stage::shift_write || stage==Stage::shift_verify;
             if(!reply) {
@@ -2073,10 +2090,11 @@ DpiCommandResult handle_dpi_command(logi::Mouse* mouse,const wchar_t* path,dpi_i
 }
 
 enum class EventExit { stopped,restart,unavailable };
+struct TakeoverTiming { ULONGLONG discovery_started{},connected{},settings_restored{}; };
 
 EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::optional<Wheel>& wheel,
             Mappings& mappings, const wchar_t* path,std::size_t& registered,bool* input_seen=nullptr,
-            std::optional<MainWheel>* owned_main=nullptr) {
+            std::optional<MainWheel>* owned_main=nullptr,const TakeoverTiming* timing=nullptr) {
     std::optional<MainWheel> no_main;
     auto& main=owned_main?*owned_main:no_main;
     const auto& bindings = mappings.bindings;
@@ -2166,6 +2184,19 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
     GetLastInputInfo(&last_input);
     auto activity=last_input.dwTime;
     LONG64 last_checked_event{};
+    if(WaitForSingleObject(stop_event,0)==WAIT_OBJECT_0)return EventExit::stopped;
+    if(mouse.channel) {
+        const auto input_ready=GetTickCount64();
+        if(health)InterlockedExchange64(&health->checked,static_cast<LONG64>(input_ready));
+        mapping_readiness(true);
+        if(timing) {
+            std::fprintf(stderr,"Takeover timing: discovery=%llums settings=%llums mappings-and-dpi=%llums total=%llums.\n",
+                timing->connected-timing->discovery_started,timing->settings_restored-timing->connected,
+                input_ready-timing->settings_restored,input_ready-timing->discovery_started);
+            std::printf("%s: %s, %zu remapped controls.\n",dpi_restored&&parameters_restored?"Ready":"Degraded (saved mouse settings pending)",mouse.device.name.c_str(),controls.size());
+            std::fflush(stdout);
+        }
+    }
     for (;;) {
         if (WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0) {cancel_health();return EventExit::stopped;}
         const auto now_tick = GetTickCount64();
@@ -2408,7 +2439,8 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         }
         if (!hotkeys.empty()) dispatch_hotkeys(hotkeys, pending, sequences, mouse);
         auto timeout = sequences.service(mouse);
-        if(main&&sequences.scrolling.rejected){mapping_readiness(false);return EventExit::restart;}
+        // A foreground/UIPI rejection affects that output only. Releasing the HID
+        // session here would also drop unrelated buttons and restart discovery.
         // A retired software-ID window can make begin_control busy without any I/O
         // outstanding; retain a timer wake even when the mouse sends no notifications.
         if(periodic.active() && !periodic.inflight)timeout=std::min<DWORD>(timeout,50);
@@ -2512,8 +2544,8 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         if(main&&packet.bytes[2]==mouse.wheel&&event==0) {
             if(repair_quarantine||reload_window||(settings_unverified_mask&12))continue;
             const auto movement=smooth_scroll::decode(data,main->multiplier,(main->mode&4)!=0);
-            if(movement&&movement->units&&!sequences.scrolling.feed(1,movement->units,foreground.capture())) {
-                mapping_readiness(false);return EventExit::restart;
+            if(movement&&movement->units&&!sequences.scrolling.feed(1,movement->units,foreground.capture(),mappings.scroll_smooth_all.value_or(false))) {
+                sequences.failed=true;
             }
             continue;
         }
@@ -2532,7 +2564,7 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
                 wheel->previous=binding;wheel->remainder=0;
                 const auto units=std::abs(static_cast<double>(rotation))*wheel->native_resolution*speed*120./
                     (wheel->diverted_resolution*100.);
-                if(!sequences.scrolling.feed(0,binding->actions[0].operation==Operation::scroll_left?-units:units,owner))sequences.failed=true;
+                if(!sequences.scrolling.feed(0,binding->actions[0].operation==Operation::scroll_left?-units:units,owner,mappings.scroll_smooth_all.value_or(false)))sequences.failed=true;
                 continue;
             }
             sequences.scrolling.cancel(0);
@@ -2749,25 +2781,10 @@ public:
     }
 
     void restore() {
-        if (restart_.empty() || options_running()) return;
-        if(!std::filesystem::exists(restart_)) {
-            std::puts("Previously paused Options+ was uninstalled; standalone input restored.");
-            restart_.clear();return;
+        if (!restart_.empty()) {
+            std::puts("Standalone input restored.");
+            restart_.clear();
         }
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        startup.dwFlags = STARTF_USESHOWWINDOW;
-        startup.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION process{};
-        if (CreateProcessW(restart_.c_str(), nullptr, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
-                           restart_.parent_path().c_str(), &startup, &process)) {
-            CloseHandle(process.hThread);
-            CloseHandle(process.hProcess);
-            std::puts("Options+ agent restarted.");
-        } else {
-            std::fprintf(stderr, "Could not restart Options+ (Win32 %lu).\n", GetLastError());
-        }
-        restart_.clear();
     }
 
     ~OptionsSession() { restore(); }
@@ -2960,7 +2977,7 @@ int run_agent(const wchar_t* path, bool take_over) {
         }
         bool retry_immediately=false;
         const auto discovery_started=GetTickCount64();
-        auto mouse = logi::connect(stop_event);
+        auto mouse = logi::connect(stop_event, false, false);
         if (mouse) {
             const auto connected=GetTickCount64();
             restore_owner_settings(path,*mouse);
@@ -2985,13 +3002,10 @@ int run_agent(const wchar_t* path, bool take_over) {
             if(wheel)publish_setting_observation(observe_setting_group(*mouse,wheel,SettingKey::thumb_invert),16);
             if (!dpi_restored)
                 std::fputs("Could not restore saved pointer speed.\n", stderr);
-            if(health){InterlockedIncrement(&health->connections);InterlockedExchange64(&health->checked,static_cast<LONG64>(GetTickCount64()));mapping_readiness(true);}
-            std::fprintf(stderr,"Takeover timing: discovery=%llums settings=%llums mappings-and-dpi=%llums total=%llums.\n",
-                connected-discovery_started,settings_restored-connected,GetTickCount64()-settings_restored,GetTickCount64()-discovery_started);
-            std::printf("%s: %s, %zu remapped controls.\n", dpi_restored&&parameters_restored?"Ready":"Degraded (saved mouse settings pending)",mouse->device.name.c_str(), controls.size());
-            std::fflush(stdout);
+            if(health)InterlockedIncrement(&health->connections);
+            const TakeoverTiming timing{discovery_started,connected,settings_restored};
             bool input_seen{};
-            const auto ended=events(*mouse, controls, wheel, mappings,path,registered,&input_seen,&main);
+            const auto ended=events(*mouse, controls, wheel, mappings,path,registered,&input_seen,&main,&timing);
             mapping_readiness(false);
             if(setting_commands)setting_commands->observe({},false,settings_saved,31);
             if(ended!=EventExit::unavailable)restore(*mouse, controls, wheel,true,main);

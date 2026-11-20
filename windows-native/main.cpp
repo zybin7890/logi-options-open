@@ -1,8 +1,10 @@
+#include "cli_entry.hpp"
 #include "mouse.hpp"
 #include "remap.hpp"
 #include "notifications_hud.hpp"
 #include "ui_settings.hpp"
 #include "flow.hpp"
+#include "../first_run.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -115,7 +117,7 @@ void json_string(std::string_view value) {
     std::putchar('"');
 }
 
-const char* boolean(bool value) { return value ? "true" : "false"; }
+const char* json_boolean(bool value) { return value ? "true" : "false"; }
 
 std::optional<unsigned> read_status_setting(logi::Mouse& mouse,std::wstring_view setting,
                                           const AgentSettingsSnapshot& cached,bool owned) {
@@ -142,7 +144,7 @@ void print_status_text(logi::Mouse& mouse) {
     }
     if (owned) std::printf("thumb-direction-source=%s software=%s sampled_at_ms=%llu\n",
         cached.available && (cached.observed_mask&16u)?"daemon-last-confirmed":"unknown",
-        boolean(cached.available && (cached.software_mask&16u)),cached.sampled_at_ms[4]);
+        json_boolean(cached.available && (cached.software_mask&16u)),cached.sampled_at_ms[4]);
     if (!mouse.dpi_choices.empty()) {
         std::printf("dpi-options:");
         for (const auto value:mouse.dpi_choices) std::printf(" %u",value);
@@ -165,8 +167,8 @@ void print_hosts(const std::vector<logi::HostSlot>& slots) {
     for (const auto& slot : slots) {
         if (!first) std::putchar(',');
         first = false;
-        std::printf("{\"slot\":%u,\"current\":%s,\"paired\":%s}", slot.slot, boolean(slot.current),
-                    slot.paired ? boolean(*slot.paired) : "null");
+        std::printf("{\"slot\":%u,\"current\":%s,\"paired\":%s}", slot.slot, json_boolean(slot.current),
+                    slot.paired ? json_boolean(*slot.paired) : "null");
     }
     std::puts("]");
 }
@@ -207,7 +209,7 @@ void print_status(logi::Mouse& mouse) {
     std::printf("},\"thumb_direction_source\":\"%s\",\"thumb_direction_software\":%s,"
                 "\"thumb_direction_sampled_at_ms\":%llu,\"dpi_choices\":[",
                 owned?(cached.available && (cached.observed_mask&16u)?"daemon_last_confirmed":"unknown"):"hardware_readback",
-                boolean(cached.available && (cached.software_mask&16u)),cached.sampled_at_ms[4]);
+                json_boolean(cached.available && (cached.software_mask&16u)),cached.sampled_at_ms[4]);
     for (std::size_t i = 0; i < mouse.dpi_choices.size(); ++i) {
         if (i) std::putchar(',');
         std::printf("%u", mouse.dpi_choices[i]);
@@ -230,18 +232,56 @@ void print_status(logi::Mouse& mouse) {
 
 } // namespace
 
-int wmain(int argc, wchar_t** argv) {
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+namespace cli_entry {
+
+void init_agent_hooks() {
     notifications_hud::init_hooks();
     ui_settings::flow_poll_hook() = &flow_poll_bridge;
     ui_settings::flow_stop_hook() = &flow_stop_bridge;
-    struct DaemonShutdownGuard {
-        ~DaemonShutdownGuard() {
-            flow_stop_bridge();
-            notifications_hud::shutdown();
-        }
-    } shutdown_guard;
+}
+
+void shutdown_agent_hooks() {
+    flow_stop_bridge();
+    notifications_hud::shutdown();
+}
+
+void attach_parent_console_if_needed() {
+    const auto needs_bind = [](DWORD std_id) {
+        const HANDLE h = GetStdHandle(std_id);
+        return !h || h == INVALID_HANDLE_VALUE || GetFileType(h) == FILE_TYPE_UNKNOWN;
+    };
+    const bool need_out = needs_bind(STD_OUTPUT_HANDLE);
+    const bool need_err = needs_bind(STD_ERROR_HANDLE);
+    if (!need_out && !need_err) return;
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    FILE* dummy{};
+    if (need_out) freopen_s(&dummy, "CONOUT$", "w", stdout);
+    if (need_err) freopen_s(&dummy, "CONOUT$", "w", stderr);
+}
+
+int run_cli_main(int argc, wchar_t** argv) {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
     const std::wstring_view command = argc > 1 ? argv[1] : L"help";
+    if (command == L"disclaimer" && argc == 2) {
+        std::puts(loo::notice_text);
+        return 0;
+    }
+    if (command == L"accept-disclaimer" && argc == 2) {
+        std::puts(loo::notice_text);
+        return loo::accept_notice() ? 0 : 2;
+    }
+    const bool check_notice = command == L"check-disclaimer" && argc == 2;
+    const bool changes_input = command == L"watch" || command == L"run" || command == L"run-preview" ||
+        command == L"set" || command == L"switch-host" || command == L"play-actions" || command == L"reload";
+    if ((check_notice || changes_input) && loo::notice_required()) {
+        std::fprintf(stderr, "%s\n\nRead the notice and run logi-native.exe accept-disclaimer to continue.\n", loo::notice_text);
+        return 2;
+    }
+    if (check_notice) return 0;
+    init_agent_hooks();
+    struct DaemonShutdownGuard {
+        ~DaemonShutdownGuard() { shutdown_agent_hooks(); }
+    } shutdown_guard;
     if (command == L"list" && argc == 2) {
         logi::connect(nullptr, true);
         return 0;
@@ -273,7 +313,7 @@ int wmain(int argc, wchar_t** argv) {
             result.status=ReloadStatus::superseded;
         const bool confirmed=result.status==ReloadStatus::applied;
         std::printf("{\"confirmed\":%s,\"status\":\"%s\",\"request_id\":%llu,\"instance_id\":%llu,"
-                    "\"pid\":%lu,\"revision\":%llu,\"fingerprint\":\"",boolean(confirmed),
+                    "\"pid\":%lu,\"revision\":%llu,\"fingerprint\":\"",json_boolean(confirmed),
                     reload_status_name(result.status),result.request_id,result.instance_id,result.pid,result.revision);
         for (const auto byte:result.fingerprint) std::printf("%02x",static_cast<unsigned>(byte));
         std::puts("\"}");
@@ -329,8 +369,8 @@ int wmain(int argc, wchar_t** argv) {
                 is_current_setting_result(result);
             std::printf("{\"status\":\"%s\",\"confirmed\":%s,\"saved\":%s,\"software\":%s,"
                         "\"request_id\":%llu,\"instance_id\":%llu,\"pid\":%lu,\"revision\":%llu,\"observed\":{",
-                        setting_status_name(result.status),boolean(confirmed),boolean(confirmed && result.saved),
-                        boolean(result.software),result.request_id,result.instance_id,result.pid,result.revision);
+                        setting_status_name(result.status),json_boolean(confirmed),json_boolean(confirmed && result.saved),
+                        json_boolean(result.software),result.request_id,result.instance_id,result.pid,result.revision);
             bool first=true;
             for (unsigned bit=0;bit<std::size(wheel_keys);++bit) if (result.observed_mask&(1u<<bit)) {
                 if (!first) std::putchar(',');
@@ -360,7 +400,7 @@ int wmain(int argc, wchar_t** argv) {
             if (owned || result.status!=DpiCommandStatus::not_running) {
                 std::printf("dpi_status=%s request_id=%llu requested=%u applied=%s saved=%s\n",
                             dpi_command_status_name(result.status),result.request_id,result.requested,
-                            boolean(result.applied),boolean(result.saved));
+                            json_boolean(result.applied),json_boolean(result.saved));
                 if (result.observed_valid) std::printf("dpi=%u\n",result.observed);
                 if (!result.applied || !result.saved) {
                     std::fputs(result.applied?"Pointer speed applied, but could not save it for the next start.\n":
@@ -428,6 +468,9 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     std::puts("LogiNative | Windows x64\n"
+              "  disclaimer                  Show the first-use notice\n"
+              "  check-disclaimer            Check whether the notice has been acknowledged\n"
+              "  accept-disclaimer           Acknowledge the notice before changing input\n"
               "  list                        List awake HID++ devices\n"
               "  status                      Read first compatible mouse\n"
               "  status-json                 Read mouse settings as JSON\n"
@@ -437,7 +480,7 @@ int wmain(int argc, wchar_t** argv) {
               "  hosts-json                  List Easy-Switch pairing states as JSON\n"
               "  switch-host <slot>          Request a paired Easy-Switch host\n"
               "  run <mappings.ini>          Run remaps and gestures\n"
-              "  run-preview <mappings.ini>  Temporarily take over and restore Options+ on stop\n"
+              "  run-preview <mappings.ini>  Run remaps after closing conflicting daemons\n"
               "  preview-ring <mappings.ini> Preview action selection without executing it\n"
               "  check-config <mappings.ini> Validate mappings before starting\n"
               "  stop                        Stop and restore button reporting\n"
@@ -447,3 +490,5 @@ int wmain(int argc, wchar_t** argv) {
               "Settings: dpi, smartshift (0-50), ratchet, hires, invert, thumb-invert");
     return command == L"help" || command == L"--help" ? 0 : 2;
 }
+
+} // namespace cli_entry
