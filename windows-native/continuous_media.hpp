@@ -70,7 +70,10 @@ public:
     void reset() { *this = {}; }
     PresetKind kind() const { return kind_; }
     bool engaged() const { return engaged_; }
-    bool direction_locked() const { return kind_ == PresetKind::zoom_rotate; }
+    bool direction_locked() const {
+        return kind_ == PresetKind::zoom_rotate || kind_ == PresetKind::app_nav ||
+               kind_ == PresetKind::window_management || kind_ == PresetKind::arrange_windows;
+    }
 
     // Returns 1=left, 2=right, 3=up, 4=down (matching Gesture enum values).
     std::optional<int> move(int x, int y, std::uint64_t now, int start_threshold, int action_threshold) {

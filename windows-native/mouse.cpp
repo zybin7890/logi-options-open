@@ -63,7 +63,42 @@ static void remember_route_hint(const discovery::Hint& hint) {
     RegCloseKey(key);
 }
 
-std::optional<Mouse> connect(HANDLE stop, bool list) {
+static void read_device_info(Channel& channel, Device& device, bool receiver) {
+    if (const auto fw_feat = feature(channel, device.slot, 0x0003)) {
+        if (const auto info = channel.request(device.slot, fw_feat, 0); info && info.packet.data().size() >= 5) {
+            if (const auto ser = parse_serial_unit_id_0003(info.packet.data()))
+                device.serial = *ser;
+            const unsigned entities = std::min<unsigned>(info.packet.data()[0], 8);
+            for (unsigned e = 0; e < entities; ++e) {
+                const auto fw = channel.request(device.slot, fw_feat, 1, {static_cast<Byte>(e)});
+                if (fw && !fw.packet.data().empty() && fw.packet.data()[0] == 0) {
+                    if (const auto parsed = parse_fw_version_0003(fw.packet.data())) {
+                        device.firmware = *parsed;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (receiver) {
+        if (const auto r_feat = feature(channel, 0xFF, 0x0003)) {
+            if (const auto r_info = channel.request(0xFF, r_feat, 0); r_info && !r_info.packet.data().empty()) {
+                const unsigned entities = std::min<unsigned>(r_info.packet.data()[0], 8);
+                for (unsigned e = 0; e < entities; ++e) {
+                    const auto fw = channel.request(0xFF, r_feat, 1, {static_cast<Byte>(e)});
+                    if (fw && !fw.packet.data().empty() && fw.packet.data()[0] == 0) {
+                        if (const auto parsed = parse_fw_version_0003(fw.packet.data())) {
+                            device.receiver_firmware = *parsed;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+std::optional<Mouse> connect(HANDLE stop, bool list, bool include_device_info) {
     // Discovery is a hint, never a cached device/feature result. Re-probe the
     // last successful route before waiting on empty receiver slots again.
     static std::mutex route_mutex;
@@ -99,38 +134,7 @@ std::optional<Mouse> connect(HANDLE stop, bool list) {
             if (!dpi) continue;
             const auto enhanced = find(0x2111);
             const auto unified = find(0x1004);
-            if (const auto fw_feat = find(0x0003)) {
-                if (const auto info = channel->request(device->slot, fw_feat, 0); info && info.packet.data().size() >= 5) {
-                    if (const auto ser = parse_serial_unit_id_0003(info.packet.data()))
-                        device->serial = *ser;
-                    const unsigned entities = std::min<unsigned>(info.packet.data()[0], 8);
-                    for (unsigned e = 0; e < entities; ++e) {
-                        const auto fw = channel->request(device->slot, fw_feat, 1, {static_cast<Byte>(e)});
-                        if (fw && !fw.packet.data().empty() && fw.packet.data()[0] == 0) {
-                            if (const auto parsed = parse_fw_version_0003(fw.packet.data())) {
-                                device->firmware = *parsed;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if (interface.receiver) {
-                if (const auto r_feat = feature(*channel, 0xFF, 0x0003)) {
-                    if (const auto r_info = channel->request(0xFF, r_feat, 0); r_info && !r_info.packet.data().empty()) {
-                        const unsigned entities = std::min<unsigned>(r_info.packet.data()[0], 8);
-                        for (unsigned e = 0; e < entities; ++e) {
-                            const auto fw = channel->request(0xFF, r_feat, 1, {static_cast<Byte>(e)});
-                            if (fw && !fw.packet.data().empty() && fw.packet.data()[0] == 0) {
-                                if (const auto parsed = parse_fw_version_0003(fw.packet.data())) {
-                                    device->receiver_firmware = *parsed;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            if (include_device_info) read_device_info(*channel, *device, interface.receiver);
             Mouse mouse{
                 .channel = nullptr, .device = *device, .dpi = dpi,
                 .shift = enhanced ? enhanced : find(0x2110), .wheel = find(0x2121),

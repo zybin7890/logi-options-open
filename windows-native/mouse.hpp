@@ -25,7 +25,9 @@ struct HostSlot {
     std::optional<bool> paired;
 };
 
-std::optional<Mouse> connect(HANDLE stop = nullptr, bool list = false);
+// Mapping owners do not need the display-only serial/firmware queries before
+// they restore input. UI and CLI callers retain the complete device information.
+std::optional<Mouse> connect(HANDLE stop = nullptr, bool list = false, bool include_device_info = true);
 std::vector<HostSlot> hosts(Mouse& mouse);
 bool switch_host(Mouse& mouse, unsigned target);
 std::optional<unsigned> get(Mouse& mouse, std::wstring_view setting);

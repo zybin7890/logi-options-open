@@ -55,7 +55,7 @@ target_compile_definitions(logi-reconnect-latency-tests PRIVATE UNICODE _UNICODE
 target_compile_options(logi-reconnect-latency-tests PRIVATE -ffunction-sections -fdata-sections)
 target_link_options(logi-reconnect-latency-tests PRIVATE -static -Wl,--gc-sections)
 target_link_libraries(logi-reconnect-latency-tests PRIVATE user32 shell32 advapi32)
-foreach(case stop disconnect repeated-loss input-resets-retry failed-probe health-timeout health-protocol restore-timeout restore-io-error)
+foreach(case stop disconnect repeated-loss input-resets-retry failed-probe health-timeout health-timeout-input health-timeout-persistent health-io-error health-write-timeout health-protocol restore-timeout restore-io-error ready-delayed ready-unknown ready-stop)
     add_test(NAME reconnect-latency-${case} COMMAND logi-reconnect-latency-tests "${case}" "${CMAKE_CURRENT_BINARY_DIR}/reconnect-${case}.ini")
     set_tests_properties(reconnect-latency-${case} PROPERTIES TIMEOUT 10 LABELS "isolated;reconnect")
 endforeach()
@@ -151,7 +151,7 @@ target_compile_definitions(logi-smooth-events-tests PRIVATE UNICODE _UNICODE WIN
 target_compile_options(logi-smooth-events-tests PRIVATE -ffunction-sections -fdata-sections)
 target_link_options(logi-smooth-events-tests PRIVATE -static -Wl,--gc-sections)
 target_link_libraries(logi-smooth-events-tests PRIVATE user32 shell32 advapi32)
-foreach(case parser default browser main-only main-only-loss reload-enable nonbrowser invert negative packet-resolution malformed thumb thumb-default thumb-volume action preview input-rejected
+foreach(case parser default browser main-only main-only-loss reload-enable nonbrowser invert negative packet-resolution malformed thumb thumb-default thumb-volume action preview input-rejected input-recovery input-recovery-direct
              focus pid stop disconnect reload loss loss-no-neutral health-repair acquire-verify foreign-target zero-capability restore-timeout restore-current-settings)
     add_test(NAME smooth-events-${case} COMMAND logi-smooth-events-tests "${case}" "${CMAKE_CURRENT_BINARY_DIR}/smooth-${case}.ini")
     set_tests_properties(smooth-events-${case} PROPERTIES TIMEOUT 10 LABELS "isolated;smooth")

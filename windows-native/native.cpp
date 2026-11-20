@@ -1,6 +1,9 @@
 #include "mouse.hpp"
 #include "remap.hpp"
 #include "smart_native.hpp"
+#include "cli_entry.hpp"
+#include "../first_run.hpp"
+#include "lazy_win32.hpp"
 #include "configuration_backup.hpp"
 #include "native_dpi.hpp"
 #include "native_smartshift.hpp"
@@ -34,6 +37,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <malloc.h>
 #include <map>
 #include <span>
 #include <thread>
@@ -69,7 +73,7 @@ enum Id {
     ring_all, ring_undo, ring_redo, ring_commit, gesture_presets_open, gesture_overview, profiles_previous, profiles_next,
     export_config, import_config, ring_menu, ring_cut, ring_paste, ring_clear, ring_browse,
     ring_replace, dpi_extended, ring_folder_back, smartshift_toggle, wheel_standard, wheel_reverse,
-    wheel_free, wheel_ratchet, wheel_smooth, thumb_smooth,
+    wheel_free, wheel_ratchet, wheel_smooth, wheel_smooth_all, thumb_smooth,
     open_pairing = 90, pairing_scan, pairing_bolt_lock, pairing_open_bt, pairing_tab_bolt, pairing_tab_bt,
     ring_size_small, ring_size_medium, ring_size_large,
     settings_theme_system, settings_theme_dark, settings_theme_light,
@@ -343,32 +347,54 @@ struct Device {
     std::vector<logi::HostSlot> hosts;
 };
 struct Picture {
+    HINSTANCE instance{};
+    int resource_id{};
     IStream* stream{};
     std::unique_ptr<Gdiplus::Image> image;
     std::unique_ptr<Gdiplus::Bitmap> cached;
     int cached_w{}, cached_h{};
-    ~Picture() { cached.reset(); image.reset(); if (stream) stream->Release(); }
-    void load(HINSTANCE instance, int resource) {
-        const auto item = FindResourceW(instance, MAKEINTRESOURCEW(resource), RT_RCDATA);
-        if (!item) return;
+    ~Picture() { unload(); }
+    void load(HINSTANCE inst, int resource) {
+        instance = inst;
+        resource_id = resource;
+    }
+    void unload() {
+        cached.reset();
+        image.reset();
+        if (stream) { stream->Release(); stream = nullptr; }
+        cached_w = cached_h = 0;
+    }
+    Gdiplus::Image* ensure() {
+        if (image) return image.get();
+        if (!instance || !resource_id) return nullptr;
+        const auto item = FindResourceW(instance, MAKEINTRESOURCEW(resource_id), RT_RCDATA);
+        if (!item) return nullptr;
         const DWORD length = SizeofResource(instance,item);
         const auto bytes = static_cast<const BYTE*>(LockResource(LoadResource(instance,item)));
-        if (!bytes || !length) return;
+        if (!bytes || !length) return nullptr;
         stream = SHCreateMemStream(bytes,length);
-        if (stream) image.reset(Gdiplus::Image::FromStream(stream));
+        if (stream) {
+            image.reset(Gdiplus::Image::FromStream(stream));
+            if (image && image->GetLastStatus() != Gdiplus::Ok) unload();
+        }
+        return image.get();
     }
     Gdiplus::Image* scaled(int w, int h) {
-        if (!image || w <= 0 || h <= 0) return image.get();
         if (cached && cached_w == w && cached_h == h) return cached.get();
+        auto* base = ensure();
+        if (!base || w <= 0 || h <= 0) return base;
         auto bmp = std::make_unique<Gdiplus::Bitmap>(w, h, PixelFormat32bppPARGB);
         Gdiplus::Graphics g(bmp.get());
         g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
         g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
         g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
-        if (g.DrawImage(image.get(), 0, 0, w, h) != Gdiplus::Ok) return image.get();
+        if (g.DrawImage(base, 0, 0, w, h) != Gdiplus::Ok) return base;
         cached = std::move(bmp);
         cached_w = w;
         cached_h = h;
+        // Release the full-resolution source PNG stream & image once the exact scaled bitmap is cached.
+        image.reset();
+        if (stream) { stream->Release(); stream = nullptr; }
         return cached.get();
     }
 };
@@ -441,6 +467,7 @@ struct App {
     struct RingApplication {Text name,path;bool supported{};};
     std::vector<RingApplication> ring_catalog;
     std::vector<std::size_t> ring_catalog_visible;
+    std::vector<Text> ring_registry_cache;
     std::vector<Text> ring_profile_sections,ring_applications;
     RingIcon ring_clipboard_icon;
     std::vector<Text> ring_navigation;
@@ -513,8 +540,11 @@ struct App {
     std::thread worker;
     Text work_message;
     Picture side, front, bottom, firefox_icon, chrome_icon, wps_icon;
-    Gdiplus::PrivateFontCollection symbols;
+    std::unique_ptr<Gdiplus::PrivateFontCollection> symbols;
     bool symbols_loaded{};
+    bool ui_active{};
+    ULONG_PTR gdiplus_token{};
+    HINSTANCE instance{};
     NOTIFYICONDATAW tray_icon{};
     bool tray_added{};
     bool force_exit{};
@@ -537,6 +567,16 @@ struct App {
         for (const auto& [name,icon]:application_icons) if (icon) DestroyIcon(icon);
         for (auto font : {normal,heading,bold,subheading,small,caption}) if (font) DeleteObject(font);
         for (auto brush : {background_brush,panel_brush,field_brush}) DeleteObject(brush);
+        side.unload(); front.unload(); bottom.unload();
+        firefox_icon.unload(); chrome_icon.unload(); wps_icon.unload();
+        ring_images.clear();
+        ring_fonts.faces.clear();
+        symbols.reset();
+        native_typography::shutdown();
+        if (gdiplus_token) {
+            Gdiplus::GdiplusShutdown(gdiplus_token);
+            gdiplus_token = 0;
+        }
     }
     fs::path mapping() const { return directory / L"mappings.ini"; }
 };
@@ -565,7 +605,7 @@ void apply_ui_theme(App& app) {
     app.background_brush = CreateSolidBrush(background);
     app.panel_brush = CreateSolidBrush(panel);
     app.field_brush = CreateSolidBrush(raised);
-    if (app.window) {
+    if (app.window && app.ui_active) {
         const BOOL dark = light ? FALSE : TRUE;
         DwmSetWindowAttribute(app.window, 20, &dark, sizeof(dark));
     }
@@ -690,15 +730,138 @@ void remove_tray_icon(App& app) {
     app.tray_added = false;
 }
 
+void create_fonts(App& app);
+void render(App& app);
+
+void trim_working_set() {
+    _heapmin();
+    HeapCompact(GetProcessHeap(), 0);
+    SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+}
+
+bool ensure_ui_resources(App& app) {
+    if (app.ui_active) return true;
+    lazy_win32::init_common_controls(ICC_BAR_CLASSES | ICC_STANDARD_CLASSES);
+    if (!app.gdiplus_token) {
+        Gdiplus::GdiplusStartupInput graphics;
+        if (Gdiplus::GdiplusStartup(&app.gdiplus_token, &graphics, nullptr) != Gdiplus::Ok) return false;
+    }
+    native_typography::initialize();
+    if (!app.normal) create_fonts(app);
+    const auto instance = app.instance ? app.instance : GetModuleHandleW(nullptr);
+    app.side.load(instance, 101);
+    app.front.load(instance, 102);
+    app.bottom.load(instance, 103);
+    app.firefox_icon.load(instance, 104);
+    app.chrome_icon.load(instance, 105);
+    app.wps_icon.load(instance, 106);
+    if (!app.symbols_loaded) {
+        if (const auto resource = FindResourceW(instance, MAKEINTRESOURCEW(107), RT_RCDATA)) {
+            const auto data = LockResource(LoadResource(instance, resource));
+            app.symbols = std::make_unique<Gdiplus::PrivateFontCollection>();
+            app.symbols_loaded = app.symbols->AddMemoryFont(data, SizeofResource(instance, resource)) == Gdiplus::Ok;
+            if (!app.symbols_loaded) app.symbols.reset();
+        }
+    }
+    app.ui_active = true;
+    if (app.window) {
+        apply_ui_theme(app);
+        const DWORD corners = 2;
+        DwmSetWindowAttribute(app.window, 33, &corners, sizeof(corners));
+    }
+    return true;
+}
+
+void release_ui_resources(App& app) {
+    if (app.window) KillTimer(app.window, 6);
+    app.ui_active = false;
+    app.animating = false;
+    app.moving.clear();
+    app.has_frame = false;
+    app.note = app.input = app.slider = app.speed_value = app.dpi_value = app.sensitivity_value =
+        app.action_list = app.search = app.ring_value = app.save_action = nullptr;
+    app.ring_list = app.ring_filter = app.ring_choice = app.ring_value2 = nullptr;
+    app.flow_name_edit = app.flow_host_edit = app.flow_port_edit = app.flow_pin_edit = app.action_param_box = nullptr;
+    app.tips = nullptr;
+    app.gesture = {};
+    app.hardware = {};
+    for (const auto child : app.children) DestroyWindow(child);
+    app.children.clear();
+    app.children.shrink_to_fit();
+    app.button_skins.clear();
+    app.visible.clear();
+    app.visible.shrink_to_fit();
+    app.ring_catalog.clear();
+    app.ring_catalog.shrink_to_fit();
+    app.ring_catalog_visible.clear();
+    app.ring_catalog_visible.shrink_to_fit();
+    app.ring_registry_cache.clear();
+    app.ring_registry_cache.shrink_to_fit();
+    app.ring_profile_sections.clear();
+    app.ring_profile_sections.shrink_to_fit();
+    app.ring_applications.clear();
+    app.ring_applications.shrink_to_fit();
+    app.ring_rows.clear();
+    app.ring_rows.shrink_to_fit();
+    app.ring_smart_actions.clear();
+    app.ring_smart_actions.shrink_to_fit();
+    if (app.ring_undo_stack.size() > 8) {
+        app.ring_undo_stack.erase(app.ring_undo_stack.begin(), app.ring_undo_stack.end() - 8);
+    }
+    app.ring_undo_stack.shrink_to_fit();
+    app.ring_redo_stack.shrink_to_fit();
+    app.bolt_slots.clear();
+    app.bolt_slots.shrink_to_fit();
+    app.bt_devices.clear();
+    app.bt_devices.shrink_to_fit();
+    app.discovered_peers.clear();
+    app.discovered_peers.shrink_to_fit();
+    if (app.paint_bitmap) { DeleteObject(app.paint_bitmap); app.paint_bitmap = nullptr; }
+    if (app.paint_dc) { DeleteDC(app.paint_dc); app.paint_dc = nullptr; }
+    app.paint_w = app.paint_h = 0;
+    app.side.unload();
+    app.front.unload();
+    app.bottom.unload();
+    app.firefox_icon.unload();
+    app.chrome_icon.unload();
+    app.wps_icon.unload();
+    app.ring_images.clear();
+    app.ring_fonts.faces.clear();
+    for (const auto& [name, icon] : app.application_icons) if (icon) DestroyIcon(icon);
+    app.application_icons.clear();
+    app.symbols.reset();
+    app.symbols_loaded = false;
+    for (auto* f : {&app.normal, &app.heading, &app.bold, &app.subheading, &app.small, &app.caption}) {
+        if (*f) { DeleteObject(*f); *f = nullptr; }
+    }
+    native_typography::shutdown();
+    if (app.gdiplus_token) {
+        Gdiplus::GdiplusShutdown(app.gdiplus_token);
+        app.gdiplus_token = 0;
+    }
+    CoFreeUnusedLibraries();
+    if (!app.busy) app.connection.reset();
+    trim_working_set();
+}
+
+void update_agents(App& app, bool force);
+void read_config(App& app);
+void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes, unsigned host);
+
 void restore_from_tray(App& app) {
     if (!app.window) return;
-    ShowWindow(app.window, SW_RESTORE);
-    ShowWindow(app.window, SW_SHOW);
+    update_agents(app, false);
+    read_config(app);
+    if (!ensure_ui_resources(app)) return;
+    if (app.children.empty()) render(app);
+    ShowWindow(app.window, IsIconic(app.window) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(app.window);
+    if (!app.busy && !app.waiting_agent && !app.device.battery) io(app, {}, 0);
 }
 
 void show_tray_menu(App& app) {
     if (!app.window) return;
+    update_agents(app, false);
     const auto tr = [&](const wchar_t* zh, const wchar_t* en) { return ui_settings::tr(app.ui.language, zh, en); };
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
@@ -719,7 +882,7 @@ void show_tray_menu(App& app) {
     AppendMenuW(menu, MF_STRING | (app.ui.flow_enabled ? MF_CHECKED : MF_UNCHECKED),
                 tray_toggle_flow, tr(L"启用 LogiNative Flow", L"Enable Flow"));
     AppendMenuW(menu, MF_STRING, tray_toggle_trial,
-                app.native ? tr(L"停止试用后台", L"Stop Native Daemon") : tr(L"启动试用后台", L"Start Native Daemon"));
+                app.native ? tr(L"停止设备服务", L"Stop Device Service") : tr(L"启动设备服务", L"Start Device Service"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, tray_exit, tr(L"退出 LogiNative", L"Exit LogiNative"));
 
@@ -750,8 +913,8 @@ LRESULT CALLBACK edit_selection(HWND window,UINT message,WPARAM wparam,LPARAM lp
         SendMessageW(window,EM_SETSEL,0,-1);return 0;
     }
     if(message==WM_CHAR && wparam==1) return 0;
-    if(message==WM_NCDESTROY) RemoveWindowSubclass(window,edit_selection,id);
-    return DefSubclassProc(window,message,wparam,lparam);
+    if(message==WM_NCDESTROY) lazy_win32::remove_window_subclass(window,edit_selection,id);
+    return lazy_win32::def_subclass_proc(window,message,wparam,lparam);
 }
 HWND add(App& app, const wchar_t* kind, const Text& title, DWORD style, int x,int y,int w,int h,
          int id = 0, HFONT use_font = nullptr, DWORD extension = 0) {
@@ -760,7 +923,7 @@ HWND add(App& app, const wchar_t* kind, const Text& title, DWORD style, int x,in
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                   GetModuleHandleW(nullptr),nullptr);
     SendMessageW(control,WM_SETFONT,reinterpret_cast<WPARAM>(use_font ? use_font : app.normal),FALSE);
-    if(_wcsicmp(kind,L"EDIT")==0) SetWindowSubclass(control,edit_selection,1,0);
+    if(_wcsicmp(kind,L"EDIT")==0) lazy_win32::set_window_subclass(control,edit_selection,1,0);
     app.children.push_back(control);
     return control;
 }
@@ -779,12 +942,12 @@ LRESULT CALLBACK smooth_label(HWND window,UINT message,WPARAM wparam,LPARAM lpar
         text_at(dc,reinterpret_cast<HFONT>(SendMessageW(window,WM_GETFONT,0,0)),GetTextColor(dc),value,box,DT_WORDBREAK|align);
         EndPaint(window,&paint);return 0;
     }
-    if (message==WM_NCDESTROY) RemoveWindowSubclass(window,smooth_label,id);
-    return DefSubclassProc(window,message,wparam,lparam);
+    if (message==WM_NCDESTROY) lazy_win32::remove_window_subclass(window,smooth_label,id);
+    return lazy_win32::def_subclass_proc(window,message,wparam,lparam);
 }
 HWND label(App& app,const Text& value,int x,int y,int width,int height,HFONT use_font = nullptr) {
     const auto control=add(app,L"STATIC",value,SS_LEFT,x,y,width,height,0,use_font);
-    SetWindowSubclass(control,smooth_label,1,0);
+    lazy_win32::set_window_subclass(control,smooth_label,1,0);
     return control;
 }
 LRESULT CALLBACK hover_button(HWND window,UINT message,WPARAM wparam,LPARAM lparam,
@@ -836,15 +999,15 @@ LRESULT CALLBACK hover_button(HWND window,UINT message,WPARAM wparam,LPARAM lpar
         RemovePropW(window,L"LogiNative.Hover");
         RemovePropW(window,L"LogiNative.SlotDown");
         RemovePropW(window,L"LogiNative.SlotDrag");
-        if (message==WM_NCDESTROY) RemoveWindowSubclass(window,hover_button,id);
+        if (message==WM_NCDESTROY) lazy_win32::remove_window_subclass(window,hover_button,id);
         else InvalidateRect(window,nullptr,FALSE);
     }
-    return DefSubclassProc(window,message,wparam,lparam);
+    return lazy_win32::def_subclass_proc(window,message,wparam,lparam);
 }
 HWND styled_button(App& app,const Text& title,int id,int x,int y,int width,int height,ButtonSkin skin) {
     auto control = add(app,L"BUTTON",title,BS_OWNERDRAW|WS_TABSTOP,x,y,width,height,id,app.bold);
     app.button_skins.emplace(control,std::move(skin));
-    SetWindowSubclass(control,hover_button,1,0);
+    lazy_win32::set_window_subclass(control,hover_button,1,0);
     return control;
 }
 void tooltip(App& app,HWND control) {
@@ -922,6 +1085,12 @@ bool read_smooth(const App& app,bool thumb=false) {
     const auto global=app.config.find(L"global");
     if(global==app.config.end())return false;
     const auto value=global->second.find(thumb?L"thumb.smooth":L"scroll.smooth");
+    return value!=global->second.end() && value->second==L"1";
+}
+bool read_smooth_all(const App& app) {
+    const auto global=app.config.find(L"global");
+    if(global==app.config.end())return false;
+    const auto value=global->second.find(L"scroll.smooth.all");
     return value!=global->second.end() && value->second==L"1";
 }
 Text reload_result_notice(ReloadStatus status) {
@@ -1259,7 +1428,7 @@ Text setting_result_notice(const SettingResult& result,bool confirmed) {
     Text message=names[static_cast<unsigned>(result.key)];
     if (confirmed) return message+(result.saved?L"已生效。":L"已生效，但未能保存供下次启动使用。");
     switch (result.status) {
-    case SettingStatus::not_running: return message+L"尚未应用：后台未运行，请先在「设置」开始试用。";
+    case SettingStatus::not_running: return message+L"尚未应用：设备服务未运行，请先在「设置」启动服务。";
     case SettingStatus::unsupported: return message+L"尚未应用：当前后台不支持，请更新后台后重试。";
     case SettingStatus::configuration_mismatch: return message+L"尚未应用：后台使用另一份配置。";
     case SettingStatus::busy: return message+L"尚未应用：后台忙，请稍后重试。";
@@ -1343,7 +1512,7 @@ void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes = {}, unsign
         return;
     }
     if ((!changes.empty() || host) && options_running()) {
-        notice(app,L"请先在「设置」开始试用。");
+        notice(app,L"检测到官方 Logi 后台正在占用设备，请先在「设置」启动设备服务。");
         return;
     }
     if (agent_running() && host) {
@@ -1603,7 +1772,7 @@ bool check_agent_startup(App& app,bool timeout) {
         flush_parameters(app);
         // Device labels and Easy-Switch details must not delay takeover or race
         // the daemon's initial HID requests on a second handle.
-        if(!app.busy && !app.device.battery) io(app);
+        if(app.ui_active && !app.busy && !app.device.battery) io(app);
     }
     return true;
 }
@@ -1749,7 +1918,7 @@ void fill_actions(App& app) {
 }
 LRESULT CALLBACK search_cue(HWND window,UINT message,WPARAM wparam,LPARAM lparam,
                             UINT_PTR id,DWORD_PTR) {
-    const auto result=DefSubclassProc(window,message,wparam,lparam);
+    const auto result=lazy_win32::def_subclass_proc(window,message,wparam,lparam);
     if (message==WM_PAINT && !GetWindowTextLengthW(window) && GetFocus()!=window) {
         const auto dc=GetDC(window);
         RECT rect{};
@@ -1759,7 +1928,7 @@ LRESULT CALLBACK search_cue(HWND window,UINT message,WPARAM wparam,LPARAM lparam
         ReleaseDC(window,dc);
     }
     if (message==WM_SETFOCUS || message==WM_KILLFOCUS) InvalidateRect(window,nullptr,TRUE);
-    if (message==WM_NCDESTROY) RemoveWindowSubclass(window,search_cue,id);
+    if (message==WM_NCDESTROY) lazy_win32::remove_window_subclass(window,search_cue,id);
     return result;
 }
 void actions_pane(App& app) {
@@ -1770,7 +1939,7 @@ void actions_pane(App& app) {
     const int bottom=205+38*rows+12;
     label(app,L"动作",1027,17,240,35,app.subheading);
     app.search=add(app,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,1026,110,398,25,find_action);
-    SetWindowSubclass(app.search,search_cue,1,0);
+    lazy_win32::set_window_subclass(app.search,search_cue,1,0);
     if (app.gesture_panel && !wheel) {
         for (unsigned i=0;i<app.gesture.size();++i) {
             app.gesture[i]=field_at(app,get(app,Text(point.key)+gesture_suffix[i]),field+static_cast<int>(i),0,0,1,1);
@@ -1781,7 +1950,7 @@ void actions_pane(App& app) {
                   1032,164,400,27,app.bold);
             app.action_list=add(app,L"LISTBOX",L"",WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT|
                 LBS_OWNERDRAWFIXED|LBS_HASSTRINGS,left,205,width,494,link_action);
-            SetWindowTheme(app.action_list,L"DarkMode_Explorer",nullptr);
+            lazy_win32::set_window_theme(app.action_list,L"DarkMode_Explorer",nullptr);
             SendMessageW(app.action_list,LB_SETITEMHEIGHT,0,px(38));
             fill_actions(app);
             icon_button(app,L"返回手势",gesture_overview,1030,727,210,38,L"back",Look::tab);
@@ -1809,7 +1978,7 @@ void actions_pane(App& app) {
     label(app,app.all_actions?L"其他动作":L"推荐",1032,164,245,27,app.bold);
     app.action_list=add(app,L"LISTBOX",L"",WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT|
                         LBS_OWNERDRAWFIXED|LBS_HASSTRINGS,left,205,width,38*rows,link_action);
-    SetWindowTheme(app.action_list,L"DarkMode_Explorer",nullptr);
+    lazy_win32::set_window_theme(app.action_list,L"DarkMode_Explorer",nullptr);
     SendMessageW(app.action_list,LB_SETITEMHEIGHT,0,px(38));
     fill_actions(app);
     if (!app.show_custom) {
@@ -1869,7 +2038,7 @@ LRESULT CALLBACK sliding_toggle(HWND,UINT,WPARAM,LPARAM,UINT_PTR,DWORD_PTR);
 HWND toggle_at(App& app,const Text& title,bool checked,int id,int x,int y,int width,bool on_bg=false) {
     auto control=add(app,L"BUTTON",title,BS_AUTOCHECKBOX|WS_TABSTOP,x,y,width,36,id,app.bold);
     if(on_bg) SetPropW(control,L"LogiNative.OnBackground",reinterpret_cast<HANDLE>(1));
-    SetWindowSubclass(control,sliding_toggle,1,0);
+    lazy_win32::set_window_subclass(control,sliding_toggle,1,0);
     SendMessageW(control,BM_SETCHECK,checked?BST_CHECKED:BST_UNCHECKED,0);
     return control;
 }
@@ -1881,7 +2050,7 @@ void hardware_pane(App& app) {
     const auto& values=app.device.values;
     label(app,pointer_points[index].title,1027,17,380,35,app.subheading);
     if (app.official && index!=2)
-        label(app,L"原版后台正在使用设备。可在「设置」开始试用。",1027,454,432,48,app.small);
+        label(app,L"检测到官方 Logi 后台正在使用设备，可在「设置」启动设备服务接管。",1027,540,432,48,app.small);
     if (index==1) {
         const auto tr=[&](const wchar_t* zh,const wchar_t* en){return ui_settings::tr(app.ui.language,zh,en);};
         const auto shown=app.dpi_unconfirmed && app.desired_dpi?app.desired_dpi:values[0];
@@ -1907,29 +2076,31 @@ void hardware_pane(App& app) {
         }
         toggle(app,tr(L"提高指针精确度 (Windows)",L"Enhanced Pointer Precision (Windows)"),windows_pointer_precision(),pointer_precision,374);
     } else if (index==0) {
-        label(app,L"滚动方向",1027,109,285,28,app.bold);
+        const auto tr=[&](const wchar_t* zh,const wchar_t* en){return ui_settings::tr(app.ui.language,zh,en);};
+        label(app,tr(L"滚动方向",L"Scroll Direction"),1027,109,285,28,app.bold);
         const bool reversed=shown_setting(app,4).value_or(0)!=0;
-        styled_button(app,L"已反转",wheel_reverse,1027,146,432,32,{Look::radio,reversed,{},{},{}});
-        styled_button(app,L"标准",wheel_standard,1027,178,432,32,{Look::radio,!reversed,{},{},{}});
-        app.hardware[0]=toggle(app,L"平滑滚动",read_smooth(app),wheel_smooth,235);
-        label(app,L"在网页中获得更平滑的滚动体验。",1027,283,432,40,app.small);
+        styled_button(app,tr(L"已反转",L"Inverted"),wheel_reverse,1027,146,432,32,{Look::radio,reversed,{},{},{}});
+        styled_button(app,tr(L"标准",L"Standard"),wheel_standard,1027,178,432,32,{Look::radio,!reversed,{},{},{}});
+        app.hardware[0]=toggle(app,tr(L"平滑滚动",L"Smooth Scrolling"),read_smooth(app),wheel_smooth,230);
+        app.hardware[2]=toggle(app,tr(L"全应用平滑滚动（所有桌面软件）",L"Universal Smooth Scroll (All Apps)"),read_smooth_all(app),wheel_smooth_all,270);
+        label(app,tr(L"默认支持主流浏览器；开启全应用后在编辑器与桌面软件同样平滑。",L"Smooth in browsers by default; enable All Apps for desktop-wide smoothing."),1027,312,432,38,app.small);
         const bool enabled=smartshift_enabled(app);
-        app.hardware[1]=toggle(app,L"SmartShift",enabled,smartshift_toggle,318);
-        label(app,L"快速滚动时，自动将滚轮从逐行滚动切换为疾速滚动。",1027,366,432,36,app.small);
+        app.hardware[1]=toggle(app,L"SmartShift",enabled,smartshift_toggle,356);
+        label(app,tr(L"快速滚动时，自动将滚轮从逐行滚动切换为疾速滚动。",L"Automatically shift from ratchet to free-spin on fast wheel flicks."),1027,402,432,36,app.small);
         if(enabled) {
             const auto sensitivity=shown_sensitivity(app);
-            label(app,L"灵敏度值",1027,402,340,27,app.bold);
-            app.sensitivity_value=label(app,std::to_wstring(sensitivity)+L"%",1417,402,42,27,app.small);
+            label(app,tr(L"灵敏度值",L"Sensitivity"),1027,442,340,27,app.bold);
+            app.sensitivity_value=label(app,std::to_wstring(sensitivity)+L"%",1417,442,42,27,app.small);
             SetWindowLongPtrW(app.sensitivity_value,GWL_STYLE,(GetWindowLongPtrW(app.sensitivity_value,GWL_STYLE)&~SS_TYPEMASK)|SS_RIGHT);
-            app.slider=add(app,TRACKBAR_CLASSW,L"SmartShift 灵敏度",TBS_NOTICKS|WS_TABSTOP,1018,427,452,34,dpi_range);
+            app.slider=add(app,TRACKBAR_CLASSW,L"SmartShift 灵敏度",TBS_NOTICKS|WS_TABSTOP,1018,468,452,34,dpi_range);
             SendMessageW(app.slider,TBM_SETRANGEMAX,FALSE,100);
             SendMessageW(app.slider,TBM_SETPOS,TRUE,sensitivity);
             SendMessageW(app.slider,TBM_SETPAGESIZE,0,10);
         } else {
-            label(app,L"滚动模式",1027,402,340,27,app.bold);
+            label(app,tr(L"滚动模式",L"Scroll Mode"),1027,442,340,27,app.bold);
             const bool ratchet=shown_setting(app,2).value_or(1)!=0;
-            styled_button(app,L"依照您需要的速度滚动",wheel_free,1027,441,432,32,{Look::radio,!ratchet,{},{},{}});
-            styled_button(app,L"分段",wheel_ratchet,1027,473,432,32,{Look::radio,ratchet,{},{},{}});
+            styled_button(app,tr(L"依照您需要的速度滚动",L"Free-Spin"),wheel_free,1027,480,432,32,{Look::radio,!ratchet,{},{},{}});
+            styled_button(app,tr(L"分段",L"Ratchet"),wheel_ratchet,1027,512,432,32,{Look::radio,ratchet,{},{},{}});
         }
     } else {
         const auto speed=read_thumb_speed(app);
@@ -1945,11 +2116,11 @@ void hardware_pane(App& app) {
         label(app,L"拇指滚轮方向",1027,194,340,27,app.bold);
         app.hardware[0]=toggle(app,L"反转拇指滚动方向",shown_setting(app,5).value_or(0),field,229);
         if (app.official)
-            label(app,L"原版后台正在使用设备。可在「设置」开始试用。",1027,279,432,44,app.small);
+            label(app,L"检测到官方 Logi 后台正在使用设备，可在「设置」启动设备服务接管。",1027,279,432,44,app.small);
         else if (app.device.thumb_cached)
             label(app,L"方向来自后台最近确认。",1027,279,432,44,app.small);
         app.hardware[1]=toggle(app,L"平滑滚动",read_smooth(app,true),thumb_smooth,335);
-        label(app,L"用于网页横向滚动。",1027,383,432,40,app.small);
+        label(app,L"用于浏览器与支持全应用平滑的桌面软件横向滚动。",1027,383,432,40,app.small);
     }
     const bool enabled=!app.official && !app.device.name.empty();
     if (!enabled) {
@@ -1986,12 +2157,12 @@ LRESULT CALLBACK ring_scroll(HWND window,UINT message,WPARAM wparam,LPARAM lpara
     auto& app=*reinterpret_cast<App*>(data);
     if (message==WM_NCDESTROY) {
         RemovePropW(window,L"RingScroll.Drag");
-        RemoveWindowSubclass(window,ring_scroll,id);
-        return DefSubclassProc(window,message,wparam,lparam);
+        lazy_win32::remove_window_subclass(window,ring_scroll,id);
+        return lazy_win32::def_subclass_proc(window,message,wparam,lparam);
     }
     if (message!=WM_PAINT && message!=WM_MOUSEWHEEL && message!=WM_LBUTTONDOWN &&
         message!=WM_MOUSEMOVE && message!=WM_LBUTTONUP && message!=WM_CAPTURECHANGED && message!=WM_KEYDOWN)
-        return DefSubclassProc(window,message,wparam,lparam);
+        return lazy_win32::def_subclass_proc(window,message,wparam,lparam);
     RECT bounds{};
     GetClientRect(window,&bounds);
     const int count=static_cast<int>(SendMessageW(window,LB_GETCOUNT,0,0));
@@ -2045,12 +2216,12 @@ LRESULT CALLBACK ring_scroll(HWND window,UINT message,WPARAM wparam,LPARAM lpara
             slot=target_id>=rings_first && target_id<rings_first+8?target_id-rings_first:-1;
         }
         app.ring_drag_action=-1;app.ring_dragging=false;
-        const auto result=DefSubclassProc(window,message,wparam,lparam);
+        const auto result=lazy_win32::def_subclass_proc(window,message,wparam,lparam);
         if (slot>=0) PostMessageW(app.window,assign_ring,slot,action);
         else notice(app,L"将操作拖到环上的槽位。");
         return result;
     }
-    const auto result=DefSubclassProc(window,message,wparam,lparam);
+    const auto result=lazy_win32::def_subclass_proc(window,message,wparam,lparam);
     if (message==WM_LBUTTONDOWN && !track) {
         const auto selected=SendMessageW(window,LB_GETCURSEL,0,0);
         if (selected>=0 && static_cast<std::size_t>(selected)<app.ring_rows.size()) {
@@ -2203,7 +2374,7 @@ RingValueKind ring_value_kind(std::wstring_view code) {
 }
 LRESULT CALLBACK ring_shortcut(HWND window,UINT message,WPARAM wparam,LPARAM lparam,
                                UINT_PTR id,DWORD_PTR) {
-    if (message==WM_NCDESTROY) RemoveWindowSubclass(window,ring_shortcut,id);
+    if (message==WM_NCDESTROY) lazy_win32::remove_window_subclass(window,ring_shortcut,id);
     if ((message==WM_KEYDOWN || message==WM_SYSKEYDOWN) &&
         wparam!=VK_TAB && wparam!=VK_ESCAPE) {
         Text key;
@@ -2230,7 +2401,7 @@ LRESULT CALLBACK ring_shortcut(HWND window,UINT message,WPARAM wparam,LPARAM lpa
         return 0;
     }
     if (message==WM_CHAR || message==WM_SYSCHAR) return 0;
-    return DefSubclassProc(window,message,wparam,lparam);
+    return lazy_win32::def_subclass_proc(window,message,wparam,lparam);
 }
 Text ring_editor_code(const App& app) {
     if (!app.ring_value) return app.ring_code;
@@ -2344,8 +2515,7 @@ void collect_ring_applications(App& app) {
         app.ring_catalog.push_back({fs::path(path).stem().wstring(),std::move(path),supported});
     };
     for(const auto&profile:app.profiles)if(profile!=L"global")append(profile);
-    static std::vector<Text> cached_registry_paths;
-    if (cached_registry_paths.empty()) {
+    if (app.ring_registry_cache.empty()) {
         for(const auto hive:{HKEY_CURRENT_USER,HKEY_LOCAL_MACHINE})for(const auto view:{KEY_WOW64_64KEY,KEY_WOW64_32KEY}) {
             HKEY key{};if(RegOpenKeyExW(hive,L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths",0,KEY_READ|view,&key)!=ERROR_SUCCESS)continue;
             for(DWORD index=0;;++index){wchar_t name[512]{};DWORD length=std::size(name);const auto result=RegEnumKeyExW(key,index,name,&length,nullptr,nullptr,nullptr,nullptr);if(result==ERROR_NO_MORE_ITEMS)break;if(result!=ERROR_SUCCESS)continue;
@@ -2354,12 +2524,12 @@ void collect_ring_applications(App& app) {
                     Text p(path);
                     if(p.size()>1&&p.front()==L'"'&&p.back()==L'"')p=p.substr(1,p.size()-2);
                     std::error_code error;
-                    if(fs::is_regular_file(p,error)) cached_registry_paths.push_back(std::move(p));
+                    if(fs::is_regular_file(p,error)) app.ring_registry_cache.push_back(std::move(p));
                 }
             }RegCloseKey(key);
         }
     }
-    for (const auto& path : cached_registry_paths) append(path);
+    for (const auto& path : app.ring_registry_cache) append(path);
     std::ranges::sort(app.ring_catalog,[](const auto&a,const auto&b){return a.supported!=b.supported?a.supported>b.supported:_wcsicmp(a.name.c_str(),b.name.c_str())<0;});
 }
 void render_ring_creation(App& app) {
@@ -2440,11 +2610,11 @@ void render_ring(App& app) {
     }
     app.ring_filter=add(app,L"EDIT",app.ring_query,WS_TABSTOP|ES_AUTOHSCROLL,1027,121,432,29,ring_search);
     ShowWindow(app.ring_filter,app.ring_searching?SW_SHOW:SW_HIDE);
-    SetWindowSubclass(app.ring_filter,search_cue,1,0);
+    lazy_win32::set_window_subclass(app.ring_filter,search_cue,1,0);
     app.ring_list=add(app,L"LISTBOX",L"",WS_TABSTOP|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT|
         LBS_OWNERDRAWFIXED|LBS_HASSTRINGS,1006,171,477,668,ring_library);
-    SetWindowTheme(app.ring_list,L"",L"");
-    SetWindowSubclass(app.ring_list,ring_scroll,1,reinterpret_cast<DWORD_PTR>(&app));
+    lazy_win32::set_window_theme(app.ring_list,L"",L"");
+    lazy_win32::set_window_subclass(app.ring_list,ring_scroll,1,reinterpret_cast<DWORD_PTR>(&app));
     SendMessageW(app.ring_list,LB_SETITEMHEIGHT,0,px(49));
     fill_ring_library(app);
     const auto undo=icon_button(app,L"撤销",ring_undo,43,765,40,40,L"undo");
@@ -2503,7 +2673,7 @@ void render_ring(App& app) {
                 SendMessageW(app.ring_value,EM_SETLIMITTEXT,multiline?1000:2048,0);
                 if (app.ring_value_kind==RingValueKind::shortcut) {
                     SendMessageW(app.ring_value,EM_SETREADONLY,TRUE,0);
-                    SetWindowSubclass(app.ring_value,ring_shortcut,1,0);
+                    lazy_win32::set_window_subclass(app.ring_value,ring_shortcut,1,0);
                 }
             }
             if (app.ring_value_kind==RingValueKind::open)
@@ -2682,7 +2852,7 @@ void ring_transfer_profile(App& app,bool importing) {
     wchar_t path[4096]{};if(!importing)wcscpy_s(path,L"Actions-Ring.lp5");
     OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=app.window;dialog.lpstrFile=path;dialog.nMaxFile=std::size(path);dialog.lpstrDefExt=L"lp5";
     dialog.lpstrFilter=L"Actions Ring 配置文件 (*.lp5;*.lp4;*.ini)\0*.lp5;*.lp4;*.ini\0";dialog.Flags=OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(importing?OFN_FILEMUSTEXIST:OFN_OVERWRITEPROMPT);
-    if(!(importing?GetOpenFileNameW(&dialog):GetSaveFileNameW(&dialog)))return;
+    if(!(importing?lazy_win32::get_open_file_name(&dialog):lazy_win32::get_save_file_name(&dialog)))return;
     try {
         if(importing) {
             const auto raw=read_binary(path);
@@ -2747,7 +2917,7 @@ void transfer_config(App& app,bool importing) {
     dialog.lpstrFile=path;dialog.nMaxFile=std::size(path);dialog.lpstrDefExt=L"ini";
     dialog.lpstrTitle=importing?L"导入配置":L"导出配置";
     dialog.Flags=OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR|(importing?OFN_FILEMUSTEXIST:OFN_OVERWRITEPROMPT);
-    if(!(importing?GetOpenFileNameW(&dialog):GetSaveFileNameW(&dialog)))return;
+    if(!(importing?lazy_win32::get_open_file_name(&dialog):lazy_win32::get_save_file_name(&dialog)))return;
     try {
         if(!importing){
             if(_wcsicmp(fs::absolute(path).lexically_normal().c_str(),fs::absolute(app.mapping()).lexically_normal().c_str())==0)
@@ -2786,6 +2956,39 @@ void transfer_config(App& app,bool importing) {
     }catch(const std::exception& error){notice(app,L"配置操作失败："+from_utf8(error.what()));}
 }
 void render(App& app) {
+    if (!app.ui_active) return;
+    if (app.page != home) app.front.unload();
+    if (app.page != easy) app.bottom.unload();
+    if (app.page != buttons && app.page != pointer) app.side.unload();
+    if (app.page != buttons) { app.firefox_icon.unload(); app.chrome_icon.unload(); app.wps_icon.unload(); }
+    if (app.page != ring) {
+        app.ring_images.clear();
+        app.ring_fonts.faces.clear();
+        app.ring_catalog.clear();
+        app.ring_catalog.shrink_to_fit();
+        app.ring_catalog_visible.clear();
+        app.ring_catalog_visible.shrink_to_fit();
+        app.ring_registry_cache.clear();
+        app.ring_registry_cache.shrink_to_fit();
+        app.ring_rows.clear();
+        app.ring_rows.shrink_to_fit();
+        app.ring_smart_actions.clear();
+        app.ring_smart_actions.shrink_to_fit();
+    }
+    if (app.page != buttons && app.page != ring) {
+        for (const auto& [name, icon] : app.application_icons) if (icon) DestroyIcon(icon);
+        app.application_icons.clear();
+    }
+    if (app.page != pairing) {
+        app.bolt_slots.clear();
+        app.bolt_slots.shrink_to_fit();
+        app.bt_devices.clear();
+        app.bt_devices.shrink_to_fit();
+    }
+    if (app.page != flow) {
+        app.discovered_peers.clear();
+        app.discovered_peers.shrink_to_fit();
+    }
     ring_typography=app.page==ring;
     flush_editor_edits(app);
     app.rendering=true;
@@ -2851,9 +3054,9 @@ void render(App& app) {
             const auto index=i?i+app.profile_offset:0;
             const auto& name=app.profiles[index];
             auto caption=name==L"global"?tr(L"全局",L"Global"):fs::path(name).stem().wstring();
-            auto* original_icon=_wcsicmp(caption.c_str(),L"firefox")==0?app.firefox_icon.image.get():
-                _wcsicmp(caption.c_str(),L"chrome")==0?app.chrome_icon.image.get():
-                _wcsicmp(caption.c_str(),L"ksolaunch")==0?app.wps_icon.image.get():nullptr;
+            auto* original_icon=_wcsicmp(caption.c_str(),L"firefox")==0?app.firefox_icon.ensure():
+                _wcsicmp(caption.c_str(),L"chrome")==0?app.chrome_icon.ensure():
+                _wcsicmp(caption.c_str(),L"ksolaunch")==0?app.wps_icon.ensure():nullptr;
             const auto real_icon=name==L"global" || original_icon?nullptr:application_icon(app,name);
             const std::wstring_view icon=name==L"global"?L"global":L"application";
             const int x=first+static_cast<int>(i)*48+(overflow && i?32:0);
@@ -3018,18 +3221,22 @@ void render(App& app) {
         styled_button(app,tr(L"检查固件",L"Check Firmware"),settings_check_fw,340,264,132,36,{Look::plain,false,{},{},{}});
         styled_button(app,tr(L"恢复默认设置",L"Reset Defaults"),settings_reset_defaults,486,264,142,36,{Look::plain,false,{},{},{}});
 
-        label(app,tr(L"试用模式",L"Trial Mode"),340,334,500,26,app.bold);
-        const auto status=app.native?tr(L"本地后台运行中",L"Native daemon running"):app.official?tr(L"原版 Options+ 后台运行中",L"Official daemon running"):tr(L"鼠标后台未运行",L"Mouse daemon stopped");
+        label(app,tr(L"设备后台服务",L"Device Service"),340,334,500,26,app.bold);
+        const auto status=app.native?tr(L"本地服务运行中",L"Service running"):app.official?tr(L"检测到其他 Logitech 后台运行中",L"External daemon running"):tr(L"设备服务已停止",L"Service stopped");
         label(app,status,340,368,360,26,app.bold);
-        label(app,tr(L"试用时接管鼠标，停止后恢复原版后台。",L"Takes over mouse while active; restores official daemon on stop."),340,398,480,38,app.small);
-        button(app,app.native?tr(L"停止试用",L"Stop Trial"):tr(L"开始试用",L"Start Trial"),app.native?end:begin,340,446,144,40,true);
+        label(app,tr(L"单进程原生驱动鼠标与高阶功能，零遥测、零更新器、零推荐组件。",L"Standalone single-binary mouse service with zero telemetry, updater, or marketing."),340,398,480,38,app.small);
+        button(app,app.native?tr(L"停止服务",L"Stop Service"):tr(L"启动服务",L"Start Service"),app.native?end:begin,340,446,144,40,true);
 
         label(app,tr(L"配置管理",L"Profiles & Config"),340,516,480,26,app.bold);
         styled_button(app,tr(L"刷新设备",L"Refresh"),reload,340,552,116,38,{Look::plain,false,{},{},{}});
         styled_button(app,tr(L"高级配置",L"Advanced INI"),advanced,468,552,116,38,{Look::plain,false,{},{},{}});
         styled_button(app,tr(L"导出配置",L"Export"),export_config,340,602,116,38,{Look::plain,false,{},{},{}});
         styled_button(app,tr(L"导入配置",L"Import"),import_config,468,602,116,38,{Look::plain,false,{},{},{}});
-        styled_button(app,tr(L"从原版 Options+ 导入 (settings.db)",L"Import from Options+ (settings.db)"),settings_import_options_plus,340,652,244,38,{Look::plain,false,{},{},{}});
+        {
+            std::error_code ec;
+            if (std::filesystem::exists(options_plus_import::default_db_path(), ec))
+                styled_button(app,tr(L"导入遗留 settings.db",L"Import settings.db"),settings_import_options_plus,340,652,244,38,{Look::plain,false,{},{},{}});
+        }
 
         // Right column: Theme, Language, Autostart, Tray, Primary Button Swap, Notifications
         label(app,tr(L"外观与语言",L"Appearance & Language"),900,78,500,24,app.bold);
@@ -3159,7 +3366,7 @@ void add_profile(App& app) {
     dialog.nMaxFile=std::size(path);
     dialog.lpstrTitle=L"添加应用程序";
     dialog.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
-    if (!GetOpenFileNameW(&dialog)) return;
+    if (!lazy_win32::get_open_file_name(&dialog)) return;
     if (!app.config.contains(path) && !save(app,change_section(app.source,path,{}))) return;
     app.selected=path;
     render(app);
@@ -3311,8 +3518,8 @@ void click(App& app,int id) {
         if (stop_agent()==0) {
             app.waiting_agent=false; app.waiting_stop=true; app.timer_checks=0;
             SetTimer(app.window,1,50,nullptr);
-            notice(app,L"正在停止试用…");
-        } else notice(app,L"没有运行中的本地后台。");
+            notice(app,L"正在停止设备服务…");
+        } else notice(app,L"没有运行中的本地设备服务。");
         break;
     case advanced: {
         const auto argument=L"\"" + app.mapping().wstring() + L"\"";
@@ -3333,7 +3540,7 @@ void click(App& app,int id) {
     case ring_create_next:++app.ring_creation_page;render(app);break;
     case ring_create_browse: {
         wchar_t path[4096]{};OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=app.window;dialog.lpstrFile=path;dialog.nMaxFile=std::size(path);dialog.lpstrFilter=L"应用程序 (*.exe)\0*.exe\0";dialog.Flags=OFN_FILEMUSTEXIST|OFN_NOCHANGEDIR;
-        if(GetOpenFileNameW(&dialog)){
+        if(lazy_win32::get_open_file_name(&dialog)){
             app.ring_creation_application=path;app.ring_creation_stage=3;render(app);
         }break;
     }
@@ -3464,7 +3671,7 @@ void click(App& app,int id) {
         dialog.lpstrFilter=L"应用程序和文件\0*.*\0\0";
         dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));
         dialog.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
-        if (GetOpenFileNameW(&dialog) && app.ring_value) SetWindowTextW(app.ring_value,path);
+        if (lazy_win32::get_open_file_name(&dialog) && app.ring_value) SetWindowTextW(app.ring_value,path);
         break;
     }
     case ring_undo: case ring_redo: {
@@ -3543,7 +3750,7 @@ void click(App& app,int id) {
             refresh_pairing_inventory(app);
             notice(app,next_open?L"Logi Bolt 接收器配对锁定已开启（60 秒），可长按新设备配对键连接。":L"已关闭 Logi Bolt 接收器配对锁定。");
         } else {
-            notice(app,L"未检测到可控制的 Logi Bolt 接收器（如原版后台占用请先在设置页开始试用或停止原版后台）。");
+            notice(app,L"未检测到可控制的 Logi Bolt 接收器（若被其他后台占用，请先在「设置」启动设备服务）。");
         }
         render(app);
         break;
@@ -3808,7 +4015,7 @@ void click(App& app,int id) {
         OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=app.window;
         dialog.lpstrFilter=L"应用程序与文件\0*.*\0\0";dialog.lpstrFile=path;dialog.nMaxFile=std::size(path);
         dialog.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
-        if (GetOpenFileNameW(&dialog) && app.action_param_box) SetWindowTextW(app.action_param_box,path);
+        if (lazy_win32::get_open_file_name(&dialog) && app.action_param_box) SetWindowTextW(app.action_param_box,path);
         break;
     }
     case action_param_apply: {
@@ -3919,9 +4126,9 @@ LRESULT CALLBACK sliding_toggle(HWND window,UINT message,WPARAM wparam,LPARAM lp
     }
     if (message==WM_CAPTURECHANGED || message==WM_NCDESTROY) {
         RemovePropW(window,pressed);RemovePropW(window,dragged);
-        if (message==WM_NCDESTROY) RemoveWindowSubclass(window,sliding_toggle,id);
+        if (message==WM_NCDESTROY) lazy_win32::remove_window_subclass(window,sliding_toggle,id);
     }
-    const auto result=DefSubclassProc(window,message,wparam,lparam);
+    const auto result=lazy_win32::def_subclass_proc(window,message,wparam,lparam);
     if (message==BM_SETCHECK || message==WM_SETFOCUS || message==WM_KILLFOCUS || message==WM_ENABLE || message==WM_UPDATEUISTATE)
         InvalidateRect(window,nullptr,FALSE);
     return result;
@@ -3967,8 +4174,8 @@ void draw_button(App& app, const DRAWITEMSTRUCT& item) {
             const wchar_t symbol=glyph==L"add"?0xE903:glyph==L"global"?0xE953:
                 glyph==L"close"?0xE937:glyph==L"back"?0xE907:glyph==L"forward"?0xE908:
                 glyph==L"buttons"?0xE926:glyph==L"settings"?0xE979:0;
-            if (symbol && app.symbols_loaded) {
-                Gdiplus::Font face(L"5thAug2026",static_cast<float>(px(size)),Gdiplus::FontStyleRegular,Gdiplus::UnitPixel,&app.symbols);
+            if (symbol && app.symbols_loaded && app.symbols) {
+                Gdiplus::Font face(L"5thAug2026",static_cast<float>(px(size)),Gdiplus::FontStyleRegular,Gdiplus::UnitPixel,app.symbols.get());
                 Gdiplus::SolidBrush brush(ink(color));
                 Gdiplus::StringFormat format;
                 format.SetAlignment(Gdiplus::StringAlignmentCenter);
@@ -4289,7 +4496,7 @@ void paint_scene(App& app,HDC dc,const RECT& bounds) {
     }
     auto* picture=app.page==easy?&app.bottom:
                   (app.page==buttons||app.page==pointer)?&app.side:nullptr;
-    if (picture && picture->image && picture->image->GetLastStatus()==Gdiplus::Ok) {
+    if (picture && picture->ensure() && picture->image->GetLastStatus()==Gdiplus::Ok) {
         Gdiplus::Graphics draw(dc);
         draw.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         const auto area=image_area(app);
@@ -4369,6 +4576,10 @@ void paint_scene(App& app,HDC dc,const RECT& bounds) {
 void paint(App& app) {
     PAINTSTRUCT ps{};
     const auto dc=BeginPaint(app.window,&ps);
+    if (!app.ui_active || !IsWindowVisible(app.window)) {
+        EndPaint(app.window,&ps);
+        return;
+    }
     RECT bounds{};
     GetClientRect(app.window,&bounds);
     // Submit one opaque frame; compositing the entire child-window tree can leave
@@ -4398,8 +4609,8 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
         read_config(*app);
         start_agent(*app);
         load_cached_device(*app);
-        render(*app);
-        if(!app->waiting_agent) io(*app);
+        if (app->ui_active) render(*app);
+        if(app->ui_active && !app->waiting_agent) io(*app);
         return 0;
     }
     if (!app) return DefWindowProcW(window,message,wparam,lparam);
@@ -4426,7 +4637,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
         flush_editor_edits(*app);
         const std::array old_fonts{app->normal,app->heading,app->bold,app->subheading,app->small,app->caption};
         layout_dpi=fitted_dpi(monitor.rcWork,HIWORD(wparam));
-        create_fonts(*app);
+        if (app->ui_active) create_fonts(*app);
         app->has_frame=false; // Old animation coordinates belong to the previous DPI.
         const int width=px(client_width),height=px(client_height);
         const int left=std::clamp(static_cast<int>(suggested.left),static_cast<int>(monitor.rcWork.left),
@@ -4434,6 +4645,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
         const int top=std::clamp(static_cast<int>(suggested.top),static_cast<int>(monitor.rcWork.top),
                                 std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-height));
         SetWindowPos(window,nullptr,left,top,width,height,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW);
+        if (!app->ui_active) return 0;
         render(*app);
         for (const auto old:old_fonts) if (old) DeleteObject(old);
         app->rendering=true;
@@ -4529,47 +4741,54 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
                 notice(*app,parameter_result_notice(*app));
             }
         }
-        if (app->partial_io || keep_dpi_controls) {
-            if (app->page==pointer) {
-                for (unsigned i=0;i<std::size(pointer_points);++i) {
-                    if (i==1 && stale_dpi) continue;
-                    const auto control=GetDlgItem(window,pins_first+i);
-                    if (auto skin=app->button_skins.find(control);skin!=app->button_skins.end()) {
-                        skin->second.secondary=pointer_summary(*app,i);
-                        SetWindowTextW(control,(skin->second.caption+L" "+skin->second.secondary).c_str());
-                        InvalidateRect(control,nullptr,FALSE);
-                    }
-                }
-                if (app->pane_index==0) {
-                    if(app->hardware[0])SendMessageW(app->hardware[0],BM_SETCHECK,read_smooth(*app)?BST_CHECKED:BST_UNCHECKED,0);
-                    if(app->hardware[1])SendMessageW(app->hardware[1],BM_SETCHECK,smartshift_enabled(*app)?BST_CHECKED:BST_UNCHECKED,0);
-                    for(const auto id:{wheel_reverse,wheel_standard,wheel_free,wheel_ratchet}) {
-                        const auto control=GetDlgItem(window,id);
-                        if(auto skin=app->button_skins.find(control);skin!=app->button_skins.end()) {
-                            const bool on=shown_setting(*app,id==wheel_reverse||id==wheel_standard?4:2).value_or(0)!=0;
-                            skin->second.active=id==wheel_reverse||id==wheel_ratchet?on:!on;
+        if (app->ui_active) {
+            if (app->partial_io || keep_dpi_controls) {
+                if (app->page==pointer) {
+                    for (unsigned i=0;i<std::size(pointer_points);++i) {
+                        if (i==1 && stale_dpi) continue;
+                        const auto control=GetDlgItem(window,pins_first+i);
+                        if (auto skin=app->button_skins.find(control);skin!=app->button_skins.end()) {
+                            skin->second.secondary=pointer_summary(*app,i);
+                            SetWindowTextW(control,(skin->second.caption+L" "+skin->second.secondary).c_str());
                             InvalidateRect(control,nullptr,FALSE);
                         }
                     }
-                    if(app->sensitivity_value && GetCapture()!=app->slider) {
-                        const auto percent=shown_sensitivity(*app);
-                        SetWindowTextW(app->sensitivity_value,(std::to_wstring(percent)+L"%").c_str());
-                        SendMessageW(app->slider,TBM_SETPOS,TRUE,percent);
+                    if (app->pane_index==0) {
+                        if(app->hardware[0])SendMessageW(app->hardware[0],BM_SETCHECK,read_smooth(*app)?BST_CHECKED:BST_UNCHECKED,0);
+                        if(app->hardware[2])SendMessageW(app->hardware[2],BM_SETCHECK,read_smooth_all(*app)?BST_CHECKED:BST_UNCHECKED,0);
+                        if(app->hardware[1])SendMessageW(app->hardware[1],BM_SETCHECK,smartshift_enabled(*app)?BST_CHECKED:BST_UNCHECKED,0);
+                        for(const auto id:{wheel_reverse,wheel_standard,wheel_free,wheel_ratchet}) {
+                            const auto control=GetDlgItem(window,id);
+                            if(auto skin=app->button_skins.find(control);skin!=app->button_skins.end()) {
+                                const bool on=shown_setting(*app,id==wheel_reverse||id==wheel_standard?4:2).value_or(0)!=0;
+                                skin->second.active=id==wheel_reverse||id==wheel_ratchet?on:!on;
+                                InvalidateRect(control,nullptr,FALSE);
+                            }
+                        }
+                        if(app->sensitivity_value && GetCapture()!=app->slider) {
+                            const auto percent=shown_sensitivity(*app);
+                            SetWindowTextW(app->sensitivity_value,(std::to_wstring(percent)+L"%").c_str());
+                            SendMessageW(app->slider,TBM_SETPOS,TRUE,percent);
+                        }
                     }
+                    if (app->pane_index==2 && app->hardware[0])
+                        if (const auto shown=shown_setting(*app,5))
+                            SendMessageW(app->hardware[0],BM_SETCHECK,*shown?BST_CHECKED:BST_UNCHECKED,0);
+                    sync_dpi_control(*app);
                 }
-                if (app->pane_index==2 && app->hardware[0])
-                    if (const auto shown=shown_setting(*app,5))
-                        SendMessageW(app->hardware[0],BM_SETCHECK,*shown?BST_CHECKED:BST_UNCHECKED,0);
-                sync_dpi_control(*app);
-            }
-        } else render(*app);
+            } else render(*app);
+        }
         flush_parameters(*app);
-        if (app->page == easy && !app->io_included_hosts && app->device.hosts.empty() &&
+        if (app->ui_active && app->page == easy && !app->io_included_hosts && app->device.hosts.empty() &&
             !app->device.name.empty() && !app->closing && !app->busy) {
             io(*app);
         }
-        if(app->page==pointer && app->pane_index==0 && (app->sensitivity_value!=nullptr)!=smartshift_enabled(*app))render(*app);
+        if(app->ui_active && app->page==pointer && app->pane_index==0 && (app->sensitivity_value!=nullptr)!=smartshift_enabled(*app))render(*app);
         save_sensitivity(*app);
+        if (!app->ui_active && !app->busy) {
+            app->connection.reset();
+            trim_working_set();
+        }
         if (app->closing && !app->busy && !app->reload_busy && !app->pending_reload) PostMessageW(window,WM_CLOSE,0,0);
         return 0;
     }
@@ -4608,13 +4827,17 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
             update_agents(*app, app->waiting_stop && (app->timer_checks % 4 == 0));
             const bool timeout=++app->timer_checks>270;
             if (app->waiting_agent) {
-                if (check_agent_startup(*app,timeout)) render(*app);
+                if (check_agent_startup(*app,timeout)) {
+                    if (app->ui_active) render(*app);
+                    else if (!app->busy) trim_working_set();
+                }
             } else if ((!app->native && (app->official || app->timer_checks>72)) || timeout) {
                 KillTimer(window,1);
                 app->waiting_stop=false;
                 update_agents(*app,true);
-                notice(*app,app->official?L"试用已停止，原版后台已恢复。":L"本地后台已停止。");
-                render(*app);
+                notice(*app,L"设备服务已停止，已恢复标准硬件输入。");
+                if (app->ui_active) render(*app);
+                else trim_working_set();
             }
         }
         return 0;
@@ -4684,9 +4907,10 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
                 }
                 render(*app);
             }
-            else if(app->page==pointer && (LOWORD(wparam)==wheel_smooth || LOWORD(wparam)==thumb_smooth)) {
+            else if(app->page==pointer && (LOWORD(wparam)==wheel_smooth || LOWORD(wparam)==wheel_smooth_all || LOWORD(wparam)==thumb_smooth)) {
                 const bool enabled=SendMessageW(control,BM_GETCHECK,0,0)==BST_CHECKED;
-                const auto key=LOWORD(wparam)==thumb_smooth?L"thumb.smooth":L"scroll.smooth";
+                const auto key=LOWORD(wparam)==thumb_smooth?L"thumb.smooth":
+                    LOWORD(wparam)==wheel_smooth_all?L"scroll.smooth.all":L"scroll.smooth";
                 save(*app,change_section(app->source,L"global",{{key,enabled?L"1":L"0"}}));
                 render(*app);
             }
@@ -4768,7 +4992,15 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
         else if(app->pane_index>=0 && (app->page==buttons || app->page==pointer) &&
                 GET_X_LPARAM(lparam)<px(pane_x)) click(*app,close_pane);
         return 0;
+    case WM_SIZE:
+        if (wparam == SIZE_MINIMIZED) {
+            if (app->paint_bitmap) { DeleteObject(app->paint_bitmap); app->paint_bitmap = nullptr; }
+            if (app->paint_dc) { DeleteDC(app->paint_dc); app->paint_dc = nullptr; }
+            app->paint_w = app->paint_h = 0;
+        }
+        return 0;
     case WM_ERASEBKGND: {
+        if (!app->ui_active) return 1;
         RECT bounds{};GetClientRect(window,&bounds);
         FillRect(reinterpret_cast<HDC>(wparam),&bounds,app->background_brush);
         return 1;
@@ -4791,6 +5023,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
         if (!app->force_exit && !app->closing && app->ui.close_to_tray) {
             ensure_tray_icon(*app);
             ShowWindow(window, SW_HIDE);
+            release_ui_resources(*app);
             return 0;
         }
         app->closing=true;
@@ -4812,22 +5045,36 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
 }
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t* cmd_line,int show) {
-    const bool start_in_tray = cmd_line && wcsstr(cmd_line, L"--tray") != nullptr;
+int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t*,int show) {
+    int argc{};
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    const bool start_in_tray = argv && argc == 2 && std::wstring_view(argv[1]) == L"--tray";
+    const bool cli_mode = argv && argc > 1 && !start_in_tray;
+    if (cli_mode) {
+        cli_entry::attach_parent_console_if_needed();
+        const int rc = cli_entry::run_cli_main(argc, argv);
+        if (argv) LocalFree(argv);
+        return rc;
+    }
+    if (argv) LocalFree(argv);
     if (const auto existing = FindWindowW(L"LogiNativeDevice", nullptr)) {
         if (!start_in_tray) PostMessageW(existing, show_existing_window, 0, 0);
         return 0;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    INITCOMMONCONTROLSEX common{sizeof(common),ICC_BAR_CLASSES|ICC_STANDARD_CLASSES};
-    InitCommonControlsEx(&common);
-    ULONG_PTR gdiplus{};
-    Gdiplus::GdiplusStartupInput graphics;
-    if (Gdiplus::GdiplusStartup(&gdiplus,&graphics,nullptr)!=Gdiplus::Ok) return 1;
+    if (start_in_tray) {
+        // A background startup must wait for acknowledgement in the GUI or CLI.
+        if (loo::notice_required()) return 2;
+    } else if (!loo::show_first_run_notice()) {
+        return 0;
+    }
+    cli_entry::init_agent_hooks();
+    struct DaemonShutdownGuard {
+        ~DaemonShutdownGuard() { cli_entry::shutdown_agent_hooks(); }
+    } shutdown_guard;
     {
-        native_typography::initialize();
-        struct FontLifetime { ~FontLifetime(){native_typography::shutdown();} } font_lifetime;
         App app;
+        app.instance = instance;
         app.taskbar_created_msg = RegisterWindowMessageW(L"TaskbarCreated");
         RECT work{};
         SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);
@@ -4838,17 +5085,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t* cmd_line,int show) {
         app.directory=fs::path(module).parent_path();
         app.ui=ui_settings::load(app.mapping());
         apply_ui_theme(app);
-        create_fonts(app);
-        app.side.load(instance,101);
-        app.front.load(instance,102);
-        app.bottom.load(instance,103);
-        app.firefox_icon.load(instance,104);
-        app.chrome_icon.load(instance,105);
-        app.wps_icon.load(instance,106);
-        if (const auto resource=FindResourceW(instance,MAKEINTRESOURCEW(107),RT_RCDATA)) {
-            const auto data=LockResource(LoadResource(instance,resource));
-            app.symbols_loaded=app.symbols.AddMemoryFont(data,SizeofResource(instance,resource))==Gdiplus::Ok;
-        }
+        if (!start_in_tray && !ensure_ui_resources(app)) return 1;
         WNDCLASSW wc{};
         wc.lpfnWndProc=window_proc;
         wc.hInstance=instance;
@@ -4864,11 +5101,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t* cmd_line,int show) {
             width,height,nullptr,nullptr,instance,&app);
         if (!window) return 1;
         app.window=window;
-        apply_ui_theme(app);
-        const DWORD corners=2;
-        DwmSetWindowAttribute(window,33,&corners,sizeof(corners));
+        if (!start_in_tray) {
+            apply_ui_theme(app);
+            const DWORD corners=2;
+            DwmSetWindowAttribute(window,33,&corners,sizeof(corners));
+        }
         ensure_tray_icon(app);
         ShowWindow(window,start_in_tray?SW_HIDE:show);
+        if (start_in_tray) trim_working_set();
         MSG message{};
         while (GetMessageW(&message,nullptr,0,0)>0) {
             if(message.message==WM_KEYDOWN && (message.hwnd==window || IsChild(window,message.hwnd))) {
@@ -4888,6 +5128,5 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t* cmd_line,int show) {
             }
         }
     }
-    Gdiplus::GdiplusShutdown(gdiplus);
     return 0;
 }

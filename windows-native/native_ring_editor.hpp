@@ -2,6 +2,7 @@
 
 #include "ring_visual.hpp"
 #include "native_ring_icon_library.hpp"
+#include "lazy_win32.hpp"
 #include <commdlg.h>
 #include <commctrl.h>
 #include <windowsx.h>
@@ -63,11 +64,13 @@ inline HWND control(Editor&e,const wchar_t*type,const wchar_t*title,DWORD style,
 }
 inline LRESULT CALLBACK keep_owner_draw(HWND window,UINT message,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR) {
     if(message==BM_SETSTYLE)wp=(wp&~BS_TYPEMASK)|BS_OWNERDRAW;
-    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,keep_owner_draw,id);
-    return DefSubclassProc(window,message,wp,lp);
+    if(message==WM_NCDESTROY)lazy_win32::remove_window_subclass(window,keep_owner_draw,id);
+    return lazy_win32::def_subclass_proc(window,message,wp,lp);
 }
 inline HWND button(Editor&e,const wchar_t*title,int id,int x,int y,int w,int h){
-    const auto window=control(e,L"BUTTON",title,BS_OWNERDRAW|WS_TABSTOP,id,x,y,w,h);SetWindowSubclass(window,keep_owner_draw,1,0);return window;
+    const auto window=control(e,L"BUTTON",title,BS_OWNERDRAW|WS_TABSTOP,id,x,y,w,h);
+    lazy_win32::set_window_theme(window,L"",L"");
+    lazy_win32::set_window_subclass(window,keep_owner_draw,1,0);return window;
 }
 inline void label(Editor&e,const wchar_t*title,int x,int y,int w,int h){control(e,L"STATIC",title,SS_LEFT,0,x,y,w,h);}
 inline void fill_library(Editor&e) {
@@ -90,7 +93,7 @@ inline void sync_numbers(Editor&e){e.loading=true;
 inline void sync(Editor&e){sync_numbers(e);e.loading=true;SetWindowTextW(e.text,e.draft.text.c_str());SetWindowTextW(GetDlgItem(e.window,41),e.draft.font_family.c_str());
     e.loading=false;image(e);update(e);
 }
-inline void pick_color(Editor&e,unsigned& value){COLORREF colors[16]{};CHOOSECOLORW choose{};choose.lStructSize=sizeof(choose);choose.hwndOwner=e.window;choose.rgbResult=ring_rgb(value);choose.lpCustColors=colors;choose.Flags=CC_FULLOPEN|CC_RGBINIT;if(ChooseColorW(&choose)){remember(e);value=(GetRValue(choose.rgbResult)<<16)|(GetGValue(choose.rgbResult)<<8)|GetBValue(choose.rgbResult);update(e);}}
+inline void pick_color(Editor&e,unsigned& value){COLORREF colors[16]{};CHOOSECOLORW choose{};choose.lStructSize=sizeof(choose);choose.hwndOwner=e.window;choose.rgbResult=ring_rgb(value);choose.lpCustColors=colors;choose.Flags=CC_FULLOPEN|CC_RGBINIT;if(lazy_win32::choose_color(&choose)){remember(e);value=(GetRValue(choose.rgbResult)<<16)|(GetGValue(choose.rgbResult)<<8)|GetBValue(choose.rgbResult);update(e);}}
 inline LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wp,LPARAM lp){
     auto*e=reinterpret_cast<Editor*>(GetWindowLongPtrW(window,GWLP_USERDATA));
     if(message==WM_NCCREATE){e=static_cast<Editor*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);e->window=window;SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(e));}
@@ -106,7 +109,7 @@ inline LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wp,LPARAM lp){
         label(*e,L"编辑图标",300,24,450,26);
         button(*e,L"撤销",10,310,384,74,32);button(*e,L"重做",11,390,384,74,32);button(*e,L"重置",12,470,384,74,32);button(*e,L"浏览…",13,578,384,110,32);
         e->image_hint=control(*e,L"STATIC",L"PNG / JPEG · 最大 150 KB",SS_LEFT,0,310,430,420,24);
-        label(*e,L"背景颜色",790,24,160,24);button(*e,L"选择",20,1065,20,94,32);button(*e,L"透明",21,963,20,94,32);
+        label(*e,L"背景颜色",790,24,148,24);button(*e,L"透明",21,948,20,100,32);button(*e,L"选择",20,1058,20,101,32);
         label(*e,L"布局",790,68,260,24);
         const wchar_t*layouts[]{L"图标上",L"文字上",L"居中",L"全尺寸"};for(int i=0;i<4;++i)button(*e,layouts[i],50+i,790+i*94,100,86,32);
         button(*e,L"图标显示",22,790,150,120,32);button(*e,L"图标颜色",23,930,150,145,32);
@@ -119,36 +122,44 @@ inline LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wp,LPARAM lp){
         button(*e,L"取消",1,790,520,100,36);button(*e,L"应用于多个",3,906,520,139,36);e->apply=button(*e,L"应用",2,1061,520,100,36);
         for(int i=0;i<8;++i){const auto name=std::to_wstring(i+1)+L"  "+(e->slot_names[i].empty()?L"空槽位":e->slot_names[i]);button(*e,name.c_str(),200+i,300+(i%2)*216,148+(i/2)*52,204,44);}
         button(*e,L"取消选择",208,360,376,140,36);button(*e,L"应用到所选槽位",209,514,376,200,36);select_slots(*e,false);
-        static std::vector<std::wstring> cached_font_names;
-        if(cached_font_names.empty()){
-            const auto dc=GetDC(window);LOGFONTW logical{};logical.lfCharSet=DEFAULT_CHARSET;EnumFontFamiliesExW(dc,&logical,font_name,reinterpret_cast<LPARAM>(&cached_font_names),0);ReleaseDC(window,dc);
-            std::ranges::sort(cached_font_names);
+        e->font_names.clear();
+        {
+            const auto dc=GetDC(window);LOGFONTW logical{};logical.lfCharSet=DEFAULT_CHARSET;EnumFontFamiliesExW(dc,&logical,font_name,reinterpret_cast<LPARAM>(&e->font_names),0);ReleaseDC(window,dc);
+            std::ranges::sort(e->font_names);
         }
-        e->font_names=cached_font_names;
         if(std::ranges::find(e->font_names,e->draft.font_family)==e->font_names.end()){e->font_names.push_back(e->draft.font_family);std::ranges::sort(e->font_names);}
         e->font_list=control(*e,L"LISTBOX",L"",LBS_NOTIFY|LBS_OWNERDRAWFIXED|LBS_HASSTRINGS|WS_VSCROLL|WS_BORDER,42,790,326,369,156);SendMessageW(e->font_list,LB_SETITEMHEIGHT,0,e->px(26));
         SendMessageW(e->font_list,WM_SETREDRAW,FALSE,0);
         for(const auto&name:e->font_names)SendMessageW(e->font_list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(name.c_str()));
         SendMessageW(e->font_list,WM_SETREDRAW,TRUE,0);
         ShowWindow(e->font_list,SW_HIDE);
-        static std::vector<ring_icon_library::Item> cached_library=ring_icon_library::enumerate();
-        e->library=cached_library;fill_library(*e);sync(*e);e->loading=false;return 0;
+        e->library=ring_icon_library::enumerate();fill_library(*e);sync(*e);e->loading=false;return 0;
     }
+    case WM_ERASEBKGND: return TRUE;
     case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORLISTBOX:{auto dc=reinterpret_cast<HDC>(wp);SetTextColor(dc,RGB(251,251,251));SetBkColor(dc,message!=WM_CTLCOLORSTATIC?RGB(42,42,42):RGB(25,25,25));return reinterpret_cast<LRESULT>(message!=WM_CTLCOLORSTATIC?e->field:e->brush);}
     case WM_DRAWITEM:{const auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lp);
         if(item.CtlID==42){if(item.itemID>=e->font_names.size())return TRUE;FillRect(item.hDC,&item.rcItem,e->field);SetBkMode(item.hDC,TRANSPARENT);SetTextColor(item.hDC,item.itemState&ODS_SELECTED?RGB(0,234,208):RGB(251,251,251));auto rect=item.rcItem;rect.left+=e->px(10);DrawTextW(item.hDC,e->font_names[item.itemID].c_str(),-1,&rect,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);return TRUE;}
         const bool selected=(item.CtlID>=50&&item.CtlID<54&&e->draft.layout==static_cast<int>(item.CtlID)-50)||(item.CtlID==22&&e->draft.show_icon)||(item.CtlID==24&&e->draft.show_text)||(item.CtlID==26&&e->draft.bold)||(item.CtlID>=200&&item.CtlID<208&&(e->selected_slots&(1u<<(item.CtlID-200))));
-        // Antialiased FillRectangle at (0,0) leaves partially covered top/left
-        // pixels over the system's light button background. Paint an opaque base.
-        const bool disabled=item.itemState&ODS_DISABLED;
-        const auto old_fill=SetDCBrushColor(item.hDC,selected?RGB(0,234,208):RGB(42,42,42));
-        FillRect(item.hDC,&item.rcItem,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));SetDCBrushColor(item.hDC,old_fill);
+        const bool disabled=(item.itemState&ODS_DISABLED)!=0;
+        const bool pressed=(item.itemState&ODS_SELECTED)!=0;
+        const COLORREF fill=selected?RGB(0,234,208):disabled?RGB(32,32,32):pressed?RGB(58,58,58):RGB(42,42,42);
+        const COLORREF border=selected?RGB(0,234,208):(item.itemState&ODS_FOCUS)&&!disabled?RGB(0,234,208):disabled?RGB(46,46,46):RGB(66,66,66);
+        FillRect(item.hDC,&item.rcItem,e->brush);
+        {
+            const auto old_b=SelectObject(item.hDC,GetStockObject(DC_BRUSH));
+            const auto old_p=SelectObject(item.hDC,GetStockObject(DC_PEN));
+            SetDCBrushColor(item.hDC,fill);
+            SetDCPenColor(item.hDC,border);
+            const int radius=e->px(8);
+            RoundRect(item.hDC,item.rcItem.left,item.rcItem.top,item.rcItem.right,item.rcItem.bottom,radius,radius);
+            SelectObject(item.hDC,old_p);SelectObject(item.hDC,old_b);
+        }
         if(item.CtlID>=100&&item.CtlID<124){const auto slot=item.CtlID-100;const auto at=e->library_page*24+slot;
             Gdiplus::Graphics graphics(item.hDC);graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             if(e->thumbnails[slot])graphics.DrawImage(e->thumbnails[slot].get(),e->px(7),e->px(6),e->px(32),e->px(32));
             else if(e->library.empty()&&at<e->filtered_icons.size())draw_native_icon(graphics,glyphs[e->filtered_icons[at]],e->px(11),e->px(10),e->px(24),RGB(251,251,251));
         }
-        else {SetBkMode(item.hDC,TRANSPARENT);SetTextColor(item.hDC,disabled?RGB(105,105,105):selected?RGB(0,0,0):RGB(251,251,251));const auto old=SelectObject(item.hDC,e->font);auto rect=item.rcItem;const auto value=text(item.hwndItem);DrawTextW(item.hDC,value.c_str(),-1,&rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(item.hDC,old);}return TRUE;}
+        else {SetBkMode(item.hDC,TRANSPARENT);SetTextColor(item.hDC,disabled?RGB(105,105,105):selected?RGB(0,0,0):RGB(251,251,251));const auto old=SelectObject(item.hDC,e->font);auto rect=item.rcItem;const auto value=text(item.hwndItem);DrawTextW(item.hDC,value.c_str(),-1,&rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(item.hDC,old);}return TRUE;}
     case WM_PAINT:{PAINTSTRUCT paint{};const auto dc=BeginPaint(window,&paint);RECT area{};GetClientRect(window,&area);FillRect(dc,&area,e->brush);Gdiplus::Graphics graphics(dc);Gdiplus::Pen divider(Gdiplus::Color(255,55,55,55));graphics.DrawLine(&divider,e->px(270),e->px(20),e->px(270),e->px(494));graphics.DrawLine(&divider,e->px(765),e->px(20),e->px(765),e->px(494));
         Gdiplus::SolidBrush canvas(Gdiplus::Color(255,0,0,0));graphics.FillEllipse(&canvas,e->px(372),e->px(92),e->px(256),e->px(256));draw_ring_visual(graphics,e->draft,e->image.get(),e->px(372),e->px(92),e->px(256),&e->fonts);
         Gdiplus::Pen selection(Gdiplus::Color(255,0,234,208));selection.SetDashStyle(Gdiplus::DashStyleDash);graphics.DrawRectangle(&selection,e->px(372),e->px(92),e->px(256),e->px(256));Gdiplus::SolidBrush handle(Gdiplus::Color(255,0,234,208));graphics.FillRectangle(&handle,e->px(622),e->px(342),e->px(12),e->px(12));
@@ -176,7 +187,7 @@ inline LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wp,LPARAM lp){
         }
         if(id==10||id==11){auto&from=id==10?e->undo:e->redo;auto&to=id==10?e->redo:e->undo;if(!from.empty()){to.push_back(e->draft);e->draft=from.back();from.pop_back();sync(*e);}return 0;}
         if(id==12){remember(*e);e->draft=e->original;sync(*e);return 0;}
-        if(id==13){wchar_t path[4096]{};OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=window;dialog.lpstrFile=path;dialog.nMaxFile=std::size(path);dialog.lpstrFilter=L"图像 (*.png;*.jpg;*.jpeg)\0*.png;*.jpg;*.jpeg\0";dialog.Flags=OFN_FILEMUSTEXIST|OFN_NOCHANGEDIR;if(GetOpenFileNameW(&dialog)){std::error_code error;const auto size=std::filesystem::file_size(path,error);Gdiplus::Image candidate(path);if(error||size>150*1024||candidate.GetLastStatus()!=Gdiplus::Ok){MessageBoxW(window,L"请选择不超过 150 KB 的 PNG 或 JPEG 图像。",L"图像无法使用",MB_OK);return 0;}remember(*e);e->draft.image=path;sync(*e);}return 0;}
+        if(id==13){wchar_t path[4096]{};OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=window;dialog.lpstrFile=path;dialog.nMaxFile=std::size(path);dialog.lpstrFilter=L"图像 (*.png;*.jpg;*.jpeg)\0*.png;*.jpg;*.jpeg\0";dialog.Flags=OFN_FILEMUSTEXIST|OFN_NOCHANGEDIR;if(lazy_win32::get_open_file_name(&dialog)){std::error_code error;const auto size=std::filesystem::file_size(path,error);Gdiplus::Image candidate(path);if(error||size>150*1024||candidate.GetLastStatus()!=Gdiplus::Ok){MessageBoxW(window,L"请选择不超过 150 KB 的 PNG 或 JPEG 图像。",L"图像无法使用",MB_OK);return 0;}remember(*e);e->draft.image=path;sync(*e);}return 0;}
         if(id==20){unsigned rgb=e->draft.background.value_or(0);const auto before=e->undo.size();pick_color(*e,rgb);if(e->undo.size()!=before)e->draft.background=rgb;update(*e);return 0;}
         if(id==23||id==25){pick_color(*e,id==23?e->draft.color:e->draft.text_color);return 0;}
         remember(*e);if(id==21)e->draft.background.reset();else if(id==22)e->draft.show_icon=!e->draft.show_icon;else if(id==24)e->draft.show_text=!e->draft.show_text;else if(id==26)e->draft.bold=!e->draft.bold;else if(id>=50&&id<54)e->draft.layout=id-50;update(*e);return 0;
