@@ -172,6 +172,7 @@ void check_competing_agents(){
 }
 class HidDevice final:public DeviceBackend{
     std::optional<Mouse> mouse;HidDiversions diversions;WheelInfo wheel_info;
+    bool manage_journal;
     unsigned current_dpi{1000};std::string device_name,cached_status;
     std::optional<std::uint32_t> device_unit() {
         const auto index=feature(*mouse->channel,mouse->device.slot,0x0003);
@@ -208,6 +209,7 @@ class HidDevice final:public DeviceBackend{
         }out<<"},\"cached\":true}";cached_status=out.str();
     }
 public:
+    explicit HidDevice(bool manage=true):manage_journal(manage){}
     bool connect(std::atomic_bool& stop)override{
         check_competing_agents();mouse=logi::connect(&stop);if(!mouse)return false;
         if(!device_name.empty()&&device_name!=mouse->device.name&&!diversions.empty()){
@@ -215,7 +217,7 @@ public:
         }
         device_name=mouse->device.name;
         // Do not make the destructor act on a new device if binding its identity fails.
-        try{diversions.bind(runtime_dir(),device_unit());}
+        try{if(manage_journal)diversions.bind(runtime_dir(),device_unit());}
         catch(...){mouse.reset();throw;}
         // A disconnect can leave diversion latched: restore our saved flags on
         // the same device before enabling the current mappings again.
@@ -666,7 +668,7 @@ std::string dispatch(const std::string& command){
     try{lock=acquire_lock();}catch(...){if(running())return transact(command);throw;}
     if(command=="stop")return "{\"stopped\":true}";
     if(command.starts_with("reload "))throw std::runtime_error("Linux daemon is not running");
-    stopped=false;signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);HidDevice device;
+    stopped=false;signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);HidDevice device(command=="recover-input");
     if(!device.connect(stopped))throw std::runtime_error("No accessible HID++ mouse; check hidraw permissions and connection");
     if(command.starts_with("play-actions ")){
         auto sequence=load_actions(std::filesystem::path(command.substr(13)));auto input=make_uinput_sink();DesktopHooks hooks(*input);
