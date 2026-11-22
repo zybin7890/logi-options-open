@@ -70,9 +70,18 @@ void save_cloud_recovery(const App& app,std::span<const unsigned char> before) {
     fs::create_directories(directory);
     FILETIME ft{};GetSystemTimeAsFileTime(&ft);
     ULARGE_INTEGER filetime{};filetime.HighPart=ft.dwHighDateTime;filetime.LowPart=ft.dwLowDateTime;
-    const auto path=directory/(L"before-cloud-"+std::to_wstring(filetime.QuadPart)+L"-"+std::to_wstring(GetCurrentProcessId())+L".ini");
-    const auto file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-    if(file==INVALID_HANDLE_VALUE)throw std::runtime_error("Cannot create local recovery backup");
+    const auto stem=L"before-cloud-"+std::to_wstring(filetime.QuadPart)+L"-"+std::to_wstring(GetCurrentProcessId());
+    fs::path path;
+    HANDLE file;
+    for(unsigned long long suffix=0;;++suffix){
+        const auto name=suffix?stem+L"-"+std::to_wstring(suffix):stem;
+        path=directory/(name+L".ini");
+        file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(file!=INVALID_HANDLE_VALUE)break;
+        const auto error=GetLastError();
+        if(error!=ERROR_FILE_EXISTS && error!=ERROR_ALREADY_EXISTS)
+            throw std::runtime_error("Cannot create local recovery backup (Windows error "+std::to_string(error)+")");
+    }
     DWORD written{};
     const bool valid=WriteFile(file,before.data(),static_cast<DWORD>(before.size()),&written,nullptr) &&
         written==before.size() && FlushFileBuffers(file);

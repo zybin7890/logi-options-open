@@ -69,7 +69,11 @@ static void flush_parameters(App& a){
     }
     a.pending_values.clear();
 }
+// A Windows clock tick can cover several apply operations on a fast disk.
+static void fixed_file_time(FILETIME* value){*value={12345,678};}
+#define GetSystemTimeAsFileTime fixed_file_time
 #include "../native_cloud_apply.hpp"
+#undef GetSystemTimeAsFileTime
 static void require(bool yes){if(!yes)throw std::runtime_error("assertion failed");}
 static void step(App& a,CloudJob& j){require(apply_cloud_download(a,j)==ApplyProgress::waiting);}
 static void rejected(App& a,CloudJob& j){try{apply_cloud_download(a,j);}catch(const std::exception&){return;}throw std::runtime_error("unexpected apply");}
@@ -78,6 +82,18 @@ int main(int argc,char** argv)try{
     const auto dir=fs::absolute(argv[1]);if(!fs::create_directory(dir))throw std::runtime_error("fixture root must be new");
     struct Cleanup{fs::path p;~Cleanup(){std::error_code ec;fs::remove_all(p,ec);}}cleanup{dir};
     const std::string a="[global]\n00C4=Win+D\n",b="[global]\n00C4=Win+Tab\n";
+    {
+        App app;app.directory=dir/"collision";
+        const Bytes earlier(a.begin(),a.end()),later(b.begin(),b.end());
+        save_cloud_recovery(app,earlier);save_cloud_recovery(app,later);
+        unsigned first=0,second=0;
+        for(const auto& entry:fs::directory_iterator(app.directory/"sync-backups")){
+            std::ifstream in(entry.path(),std::ios::binary);
+            const Bytes bytes{std::istreambuf_iterator<char>(in),{}};
+            first+=bytes==earlier;second+=bytes==later;
+        }
+        require(first==1&&second==1);
+    }
     auto initialize=[&](App& app,CloudJob& job){
         app.directory=dir;
         write(app.mapping(),"\xef\xbb\xbf"+a);
