@@ -104,5 +104,6 @@ for ((i=0; i<200; ++i)); do
 done
 [[ "$ready" == 1 ]] || { cat "$evidence/kde-capabilities.log" "$evidence/kde-provider.log"; exit 1; }
 "$driver" 2>&1 | tee "$evidence/kde-wayland-test.log"
+python3 "$(dirname -- "$0")/wayland-worker-recovery.py" "$driver" "$evidence" 2>&1 | tee "$evidence/kde-worker-recovery.log"
 LOGI_TEST_REQUIRE_NATIVE_WAYLAND=1 "$bindir/logi-linux-gui-tests" 2>&1 | tee "$evidence/kde-gui-test.log"
 LOGI_TEST_REQUIRE_NATIVE_WAYLAND=1 "$bindir/logi-linux-gui-tests" --standalone-ring 2>&1 | tee "$evidence/kde-standalone-ring-test.log"

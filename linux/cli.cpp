@@ -18,6 +18,7 @@ void help(){
         "logi-cli check-actions FILE | play-actions FILE | preview-ring CONFIG\n"
         "Action FILE: one [hotkeys] entry, matching the Windows/API format.\n"
         "Running daemon exclusively owns HID; commands use acknowledged local IPC.\n"
+        "run supervises the mapping worker. Use stop, recover-input or Ctrl+C to exit.\n"
         "play-actions accepted=true means queued, not completed. Inspect agent-status\n"
         "pending_actions, last_completed_action and last_action_error for execution.\n"
         "reload succeeds only after device/configuration application.\n"

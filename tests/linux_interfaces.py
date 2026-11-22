@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import selectors
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -137,6 +139,36 @@ def main():
             require(daemon.wait(timeout=10) == 0, "Daemon failed orderly shutdown")
             require(status().get("native") is False, "Stopped daemon still advertised active")
             print("PASS: queued action completion and graceful stop across real process boundaries", flush=True)
+
+            # Hold the supervisor so the worker cannot restart until the stop
+            # request is already queued. This makes the crash/stop race reproducible.
+            supervisor = spawn([fixture, str(config)])
+            wait(lambda: status().get("ready"), "Manual restart after stop failed")
+            owner = status()
+            require(owner["supervisor_pid"] == supervisor.pid and owner["pid"] != supervisor.pid,
+                    "Expected distinct supervisor and device owner")
+            duplicate = subprocess.run([fixture, str(config)], env=env, capture_output=True, timeout=5)
+            require(duplicate.returncode != 0 and status()["pid"] == owner["pid"],
+                    "A second launch replaced the active owner")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as client:
+                client.settimeout(10)
+                os.kill(supervisor.pid, signal.SIGSTOP)
+                try:
+                    _, stopped = os.waitpid(supervisor.pid, os.WUNTRACED)
+                    require(os.WIFSTOPPED(stopped), "Supervisor did not pause at the restart boundary")
+                    os.kill(owner["pid"], signal.SIGKILL)
+                    wait(lambda: Path(f"/proc/{owner['pid']}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z",
+                         "Worker did not exit while its supervisor was paused")
+                    client.connect(str(root / f"logi-options-open-{os.getuid()}" / "control.sock"))
+                    client.sendall(b"stop")
+                finally:
+                    os.kill(supervisor.pid, signal.SIGCONT)
+                response = client.recv(65536)
+                require(response.startswith(b"OK\n") and json.loads(response[3:])["stopped"],
+                        f"Stop queued during the restart gap was not acknowledged: {response!r}")
+            require(supervisor.wait(timeout=10) == 0 and not status()["native"],
+                    "Supervisor remained active after explicit stop during recovery")
+            print("PASS: duplicate start rejected and queued stop honored after worker SIGKILL", flush=True)
         finally:
             for child in reversed(children):
                 if child.poll() is None:

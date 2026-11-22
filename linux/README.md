@@ -63,7 +63,13 @@ cp linux/default-linux.ini "${XDG_CONFIG_HOME:-$HOME/.config}/logi-options-open/
 The disclaimer is acknowledged **once per user**, shared by GUI and CLI.
 Read-only commands and input recovery remain available without acknowledgement.
 `LOGI_OPTIONS_OPEN_CONFIG` overrides the mapping path. Otherwise XDG_CONFIG_HOME
-(or `~/.config`) is used. Run stays in the foreground; the GUI starts it detached.
+(or `~/.config`) is used. `logi-cli run` supervises the device worker in the
+foreground. The GUI starts the same supervisor detached. In `agent-status`,
+`pid` identifies the worker applying the mouse mappings and `supervisor_pid`
+identifies its supervisor. If the worker is killed, its replacement reopens
+the device and loads the saved mappings. Check `ready` to see when they apply.
+Use **停止后台** in settings or `logi-cli stop` for an intentional shutdown.
+To start again, use **启动后台** or `logi-cli run`.
 `stop` waits for input restoration and reports restoration failures. `reload [file]`
 waits for device and desktop configuration to apply; failures preserve the previous
 live configuration or clear readiness if rollback fails. A different path requires restarting the daemon.
