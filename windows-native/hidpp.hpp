@@ -114,6 +114,15 @@ private:
     std::optional<Reply> control_result_;
 };
 
+struct OwnerIdentity {
+    std::wstring route;
+    Byte slot{},major{},minor{};
+    std::array<Byte,4> unit{};
+    std::array<Byte,6> model{};
+    std::array<Byte,7> firmware{};
+    bool operator==(const OwnerIdentity&) const=default;
+};
+
 struct Device {
     Byte slot;
     Byte major;
@@ -122,6 +131,7 @@ struct Device {
     std::wstring serial{};
     std::wstring firmware{};
     std::wstring receiver_firmware{};
+    std::optional<OwnerIdentity> owner_identity{};
 };
 
 inline std::optional<std::wstring> parse_fw_version_0003(std::span<const Byte> data) {
@@ -157,8 +167,9 @@ inline std::optional<std::wstring> parse_serial_unit_id_0003(std::span<const Byt
     return serial == L"00000000" ? std::nullopt : std::optional<std::wstring>(serial);
 }
 
-std::optional<Device> probe(Channel& channel, Byte slot);
-Byte feature(Channel& channel, Byte slot, unsigned id);
+std::optional<Device> probe(Channel& channel, Byte slot,DWORD ping_timeout=1250,bool with_name=true);
+std::string read_device_name(Channel& channel, Byte slot,bool allow_partial=false);
+Byte feature(Channel& channel, Byte slot, unsigned id, DWORD timeout = 1200);
 unsigned word(std::span<const Byte> data);
 Byte high(unsigned value);
 Byte low(unsigned value);

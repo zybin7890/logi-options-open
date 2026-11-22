@@ -3,6 +3,7 @@
 #include <string_view>
 
 int run_agent(const wchar_t* path, bool take_over = false);
+void use_gui_agent_log();
 int stop_agent();
 bool reload_agent(const wchar_t* path);
 using ReloadFingerprint = std::array<unsigned char,32>;

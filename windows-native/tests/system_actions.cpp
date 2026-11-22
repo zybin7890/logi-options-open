@@ -27,13 +27,14 @@ static int references{};
  ULONG STDMETHODCALLTYPE Release() override{--references;++releases;return 1;}
 struct Volume final:IAudioEndpointVolume {
  BASIC_COM
+ int position{40},fail_at{-1};
  HRESULT STDMETHODCALLTYPE RegisterControlChangeNotify(IAudioEndpointVolumeCallback*) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE UnregisterControlChangeNotify(IAudioEndpointVolumeCallback*) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE GetChannelCount(UINT*) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE SetMasterVolumeLevel(float,LPCGUID) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE SetMasterVolumeLevelScalar(float,LPCGUID) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE GetMasterVolumeLevel(float*) override{return E_NOTIMPL;}
- HRESULT STDMETHODCALLTYPE GetMasterVolumeLevelScalar(float*) override{return E_NOTIMPL;}
+ HRESULT STDMETHODCALLTYPE GetMasterVolumeLevelScalar(float* scalar) override{*scalar=position/100.f;return S_OK;}
  HRESULT STDMETHODCALLTYPE SetChannelVolumeLevel(UINT,float,LPCGUID) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE SetChannelVolumeLevelScalar(UINT,float,LPCGUID) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE GetChannelVolumeLevel(UINT,float*) override{return E_NOTIMPL;}
@@ -41,24 +42,26 @@ struct Volume final:IAudioEndpointVolume {
  HRESULT STDMETHODCALLTYPE SetMute(BOOL value,LPCGUID context) override{assert(!context);++mute_sets;if(fail_mute_set)return E_FAIL;muted=value;return S_OK;}
  HRESULT STDMETHODCALLTYPE GetMute(BOOL* value) override{if(fail_mute_read)return E_FAIL;*value=muted;return S_OK;}
  HRESULT STDMETHODCALLTYPE GetVolumeStepInfo(UINT*,UINT*) override{return E_NOTIMPL;}
- HRESULT STDMETHODCALLTYPE VolumeStepUp(LPCGUID) override{return E_NOTIMPL;}
- HRESULT STDMETHODCALLTYPE VolumeStepDown(LPCGUID) override{return E_NOTIMPL;}
+ HRESULT STDMETHODCALLTYPE VolumeStepUp(LPCGUID id) override{assert(!id);if(position==fail_at)return E_FAIL;++position;return S_OK;}
+ HRESULT STDMETHODCALLTYPE VolumeStepDown(LPCGUID id) override{assert(!id);--position;return S_OK;}
  HRESULT STDMETHODCALLTYPE QueryHardwareSupport(DWORD*) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE GetVolumeRange(float*,float*,float*) override{return E_NOTIMPL;}
-} volume;
+} volume,speaker,headset;
 struct Device final:IMMDevice {
  BASIC_COM
+ Volume* endpoint{&volume};
  HRESULT STDMETHODCALLTYPE Activate(REFIID id,DWORD context,PROPVARIANT* parameters,void** output) override{
-    assert(id==__uuidof(IAudioEndpointVolume)&&context==CLSCTX_ALL&&!parameters);*output=&volume;volume.AddRef();return S_OK;}
+    assert(id==__uuidof(IAudioEndpointVolume)&&context==CLSCTX_ALL&&!parameters);*output=endpoint;endpoint->AddRef();return S_OK;}
  HRESULT STDMETHODCALLTYPE OpenPropertyStore(DWORD,IPropertyStore**) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE GetId(LPWSTR*) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE GetState(DWORD*) override{return E_NOTIMPL;}
-} device;
+} device,render_device;
+static EDataFlow expected_flow=eCapture;
 struct Enumerator final:IMMDeviceEnumerator {
  BASIC_COM
  HRESULT STDMETHODCALLTYPE EnumAudioEndpoints(EDataFlow,DWORD,IMMDeviceCollection**) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE GetDefaultAudioEndpoint(EDataFlow direction,ERole role,IMMDevice** output) override{
-    assert(direction==eCapture&&role==eConsole);*output=&device;device.AddRef();return S_OK;}
+    assert(direction==expected_flow&&role==eConsole);*output=direction==eRender?&render_device:&device;(*output)->AddRef();return S_OK;}
  HRESULT STDMETHODCALLTYPE GetDevice(LPCWSTR,IMMDevice**) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE RegisterEndpointNotificationCallback(IMMNotificationClient*) override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE UnregisterEndpointNotificationCallback(IMMNotificationClient*) override{return E_NOTIMPL;}
@@ -124,6 +127,20 @@ int main() {
  fail_mute_read=true;const auto previous_sets=mute_sets;assert(!perform(Action::microphone_mute)&&mute_sets==previous_sets&&references==0);fail_mute_read=false;
  fail_mute_set=true;assert(!perform(Action::microphone_mute)&&!muted&&references==0);fail_mute_set=false;
  const auto previous_uninit=uninitializes;init_result=RPC_E_CHANGED_MODE;assert(perform(Action::microphone_mute)&&uninitializes==previous_uninit);init_result=E_FAIL;assert(!perform(Action::microphone_mute));init_result=S_OK;
+ expected_flow=eRender;render_device.endpoint=&speaker;
+ muted=true;
+ auto stepped=system_actions::step_output_volume(true,3,{});
+ assert(stepped.status==S_OK&&stepped.completed==3&&speaker.position==43&&stepped.percent==43&&stepped.muted&&references==0);
+ muted=false;
+ render_device.endpoint=&headset;
+ stepped=system_actions::step_output_volume(false,2,{});
+ assert(stepped.status==S_OK&&stepped.completed==2&&headset.position==38&&speaker.position==43&&references==0);
+ headset.fail_at=39;stepped=system_actions::step_output_volume(true,4,{});
+ assert(stepped.status==E_FAIL&&stepped.completed==1&&headset.position==39&&references==0);
+ std::stop_source stop;stop.request_stop();
+ stepped=system_actions::step_output_volume(false,4,{nullptr,0,stop.get_token()});
+ assert(stepped.status==E_ABORT&&stepped.completed==0&&headset.position==39&&references==0);
+ expected_flow=eCapture;
  assert(perform(Action::shutdown)&&power_calls==1&&exit_flags==EWX_POWEROFF&&adjusts==2&&token_closes==1);
  assert(perform(Action::sleep)&&power_calls==2&&!sleep_hibernate&&!sleep_force&&!sleep_wake&&adjusts==4);
  deny_token=true;assert(!perform(Action::shutdown)&&power_calls==2);deny_token=false;

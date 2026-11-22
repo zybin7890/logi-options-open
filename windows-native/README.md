@@ -23,6 +23,22 @@
 - 支持系统托盘图标（`--tray` 静默启动、关闭最小化到托盘、`FindWindowW` 单实例唤醒已有窗口、`TaskbarCreated` 重建及右键菜单）与设置页 `HKCU\...\Run\LogiNative` 开机自启开关（默认不自动写入开机启动）。
 - Smart Actions（支持 `DateTime`、`Widget`、`HostSwitch`、`ZoomReset`、`RotateLeft/Right`、`GestureZoomRotate` 等）、Ring、CLI 及 Python API/MCP 代码均在本目录同步更新，支持范围不等同于原版全部功能（不含固件更新）。
 
+开启“开机自动启动”后，Windows 会在重启失败时检查后台，并每分钟补查一次。后台意外退出后会静默重新接管鼠标。通过托盘选择“退出”后，本次登录期间会暂停自动恢复；手动打开程序可立即恢复接管。
+
+## 后台日志
+
+在 **设置 → 后台日志** 选择关闭、仅错误、常规或详细，修改立即生效。默认使用常规。CLI 运行 `logi-native.exe log-level` 可查看当前级别，加上 `off`、`error`、`info` 或 `debug` 可切换。详细日志位于 `%LOCALAPPDATA%\LogiNative\agent.log`。
+
+## 云同步
+
+打开 **设置 → 配置管理 → 云同步**，选择一种存储方式，再点 **立即同步**。同步包包含按键映射和已保存的鼠标参数。
+
+- **OneDrive** 使用本机 OneDrive 客户端的同步根目录，可选择其他已同步的 OneDrive 目录。配置写入该目录下的 `Logi Options Open/settings.logi`，由 OneDrive 客户端上传。
+- **Google Drive** 需要在自己的 Google Cloud 项目启用 Google Drive API，创建类型为“桌面应用”的 OAuth 客户端。填写该客户端 ID 和密钥，按界面提示在浏览器中授权。配置保存在该应用专用的 Drive 数据区。
+- **WebDAV** 填写配置文件的完整 HTTPS 地址，例如 `https://dav.example.com/logi/settings.logi`，并分别填写用户名和密码。先在服务器上建好父目录。覆盖已有文件时，服务器需要返回强 ETag 并支持条件写入。
+
+首次同步时，云端没有文件会上传本机版本。如果两边已有不同配置，请选择 **使用本机版本** 上传，或选择 **使用云端版本** 下载并应用。以后只有一边改动时会同步该侧的改动，两边都改动时会保留双方并等待选择。**每分钟自动同步** 默认关闭，勾选后在程序运行期间每分钟检查一次。
+
 ## CLI
 
 ```powershell

@@ -5,9 +5,15 @@
 #include "../first_run.hpp"
 #include "lazy_win32.hpp"
 #include "configuration_backup.hpp"
+#include "config_sync_engine.hpp"
+#include "config_sync_drive.hpp"
+#include "config_sync_onedrive.hpp"
 #include "native_dpi.hpp"
 #include "native_smartshift.hpp"
+#include "agent_log.hpp"
+#include "tray_recovery.hpp"
 #include "ui_settings.hpp"
+#include "windows_autostart.hpp"
 #include "flow.hpp"
 #include "pairing.hpp"
 #include "notifications_hud.hpp"
@@ -32,6 +38,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cwchar>
 #include <cmath>
 #include <filesystem>
@@ -99,6 +107,8 @@ enum Id {
     ring_create_general=2700,ring_create_application,ring_create_import,ring_create_browse,ring_create_blank,
     ring_create_search,ring_create_previous,ring_create_next,ring_create_app_first=2800,
     flow_peer_first = 3100,
+    log_level_first=3400, cloud_settings=3410, cloud_dav,cloud_google,cloud_onedrive,cloud_endpoint,cloud_identity,
+    cloud_password,cloud_automatic,cloud_save,cloud_run,cloud_authorize,cloud_local,cloud_remote,cloud_disconnect,
 };
 struct Point { const wchar_t* key; const wchar_t* title; int x, y, align, width; };
 constexpr Point button_points[] = {
@@ -200,6 +210,7 @@ constexpr WheelAction wheel_actions[] = {
     {L"无动作",L"None",L"None"},
 };
 constexpr const wchar_t* hardware_keys[]{L"dpi",L"smartshift",L"ratchet",L"hires",L"invert",L"thumb-invert"};
+constexpr std::array<unsigned,4> pointer_presets{800,1600,3200,5000};
 constexpr const wchar_t* gesture_suffix[]{L"",L".left",L".right",L".up",L".down"};
 constexpr const wchar_t* gesture_titles[]{L"点击",L"向左",L"向右",L"向上",L"向下"};
 struct GesturePreset { const wchar_t* title; std::array<const wchar_t*,5> rules; };
@@ -341,6 +352,7 @@ struct Device {
     Text name, detail;
     Text serial, firmware, receiver_firmware;
     bool thumb_cached{};
+    ULONGLONG dpi_sampled_at{};
     std::optional<unsigned> battery;
     std::array<std::optional<unsigned>,std::size(hardware_keys)> values{};
     std::vector<unsigned> dpi;
@@ -424,7 +436,27 @@ struct ReloadEdit {
 };
 struct ReloadCompletion { ReloadEdit edit; ReloadResult result; };
 enum class ReloadViewState { idle, pending, applied, unconfirmed };
+struct CloudJob {
+    enum class ApplyStage { prepare, probe, reload, settings } apply_stage{ApplyStage::prepare};
+    loo_backup::Configuration download;
+    unsigned long long apply_reload_revision{},apply_dpi_revision{};
+    std::array<unsigned long long,6> apply_setting_revision{};
+    config_sync::Options options;
+    std::vector<unsigned char> local;
+    config_sync::SyncResult result;
+    std::wstring error;
+    bool authorization{};
+    bool cloud_confirmed{};
+    std::atomic<bool> finished{};
+};
 struct App {
+    config_sync::Options cloud_options,cloud_draft;
+    std::shared_ptr<CloudJob> cloud_job;
+    std::wstring cloud_status,cloud_secret_draft;
+    bool cloud_open{},cloud_conflict{},cloud_applying{};
+    ULONGLONG cloud_deadline{};
+    std::optional<config_sync::Mode> cloud_queued;
+    ULONGLONG cloud_queue_deadline{};
     HWND window{}, note{}, input{}, slider{}, speed_value{}, dpi_value{}, sensitivity_value{}, action_list{}, search{}, ring_value{}, save_action{};
     std::array<HWND,5> gesture{};
     std::array<HWND,5> hardware{};
@@ -548,6 +580,8 @@ struct App {
     NOTIFYICONDATAW tray_icon{};
     bool tray_added{};
     bool force_exit{};
+    bool ending_session{};
+    bool record_recovery_start{};
     HICON tray_hicon{};
     UINT taskbar_created_msg{};
     std::thread agent_thread;
@@ -846,17 +880,18 @@ void release_ui_resources(App& app) {
 
 void update_agents(App& app, bool force);
 void read_config(App& app);
-void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes, unsigned host);
+void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes, unsigned host,bool only_dpi=false);
 
 void restore_from_tray(App& app) {
     if (!app.window) return;
+    const bool reopening=!app.ui_active || IsIconic(app.window) || !IsWindowVisible(app.window);
     update_agents(app, false);
     read_config(app);
     if (!ensure_ui_resources(app)) return;
     if (app.children.empty()) render(app);
     ShowWindow(app.window, IsIconic(app.window) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(app.window);
-    if (!app.busy && !app.waiting_agent && !app.device.battery) io(app, {}, 0);
+    if (!app.busy && !app.waiting_agent && (reopening || !app.device.battery)) io(app, {}, 0);
 }
 
 void show_tray_menu(App& app) {
@@ -1334,6 +1369,7 @@ Device query_device(logi::Mouse& connection, bool include_hosts = false) {
         device.detail = std::to_wstring(battery.packet.data()[0]) + L"%  ·  Logi Bolt";
     }
     device.values[0]=logi::get(*mouse,hardware_keys[0]);
+    if(device.values[0])device.dpi_sampled_at=GetTickCount64();
     const auto status=read_agent_settings();
     if (status.available && (status.observed_mask&3u)==3u) {
         device.values[1]=status.observed[0];
@@ -1506,7 +1542,7 @@ Text parameter_result_notice(const App& app) {
     }
     return message;
 }
-void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes = {}, unsigned host = 0) {
+void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes = {}, unsigned host = 0,bool only_dpi) {
     if (app.busy) {
         for (const auto& [id,value]:changes) app.pending_values[id]=value;
         return;
@@ -1520,6 +1556,7 @@ void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes = {}, unsign
         return;
     }
     const bool include_hosts = app.page == easy;
+    const bool pointer_read=only_dpi && app.connection.has_value();
     app.busy=true;
     app.partial_io=!changes.empty() && !host;
     app.io_included_hosts=changes.empty() && !host && include_hosts;
@@ -1532,7 +1569,7 @@ void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes = {}, unsign
     app.io_writes_dpi=std::ranges::any_of(changes,[](auto item){return item.first==0;});
     notice(app,app.partial_io?L"正在应用设置…":L"正在读取设备…");
     app.io_notice_revision=app.notice_revision;
-    app.worker=std::thread([&app, base=app.device, changes=std::move(changes), host, include_hosts]() mutable {
+    app.worker=std::thread([&app, base=app.device, changes=std::move(changes), host, include_hosts, pointer_read]() mutable {
         app.work_message.clear();
         app.work_unattempted.clear();
         app.work_dpi_failed=app.io_writes_dpi;
@@ -1571,6 +1608,17 @@ void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes = {}, unsign
             app.next_device=std::move(base);
             PostMessageW(app.window,finished,0,0);
             return;
+        }
+        if(pointer_read) {
+            // Reuse the GUI's read handle for a single sensor read while the panel
+            // is open. If the handle became invalid, rediscover through the usual path.
+            if(const auto observed=logi::get(*app.connection,hardware_keys[0])) {
+                base.values[0]=*observed;
+                base.dpi_sampled_at=GetTickCount64();
+                app.next_device=std::move(base);
+                PostMessageW(app.window,finished,0,0);
+                return;
+            }
         }
         if (changes.empty()) app.connection.reset();
         if (!app.connection) app.connection=logi::connect();
@@ -1617,7 +1665,8 @@ void io(App& app, std::vector<std::pair<unsigned,unsigned>> changes = {}, unsign
             }
             else {app.connection.reset();app.next_device=std::move(base);}
         } else {
-            if (app.io_writes_dpi) base.values[0].reset();
+            base.values[0].reset();
+            base.dpi_sampled_at=0;
             app.next_device=std::move(base);
             app.work_message=L"未找到响应的鼠标。唤醒后重试或点刷新。";
         }
@@ -1641,7 +1690,9 @@ void queue_parameter(App& app,unsigned id,unsigned value,bool typing=false) {
     if (id==0) {
         ++app.dpi_revision;
         app.desired_dpi=value;
-        app.dpi_unconfirmed=app.dpi_unconfirmed || app.device.values[0]!=value;
+        // Even choosing the displayed DPI is an explicit request: the device
+        // may have reset or a different client may have changed the sensor.
+        app.dpi_unconfirmed=true;
     } else {
         app.setting_revision[id]=++app.setting_serial;
         app.desired_setting[id]=value;
@@ -1674,21 +1725,38 @@ void save_sensitivity(App& app) {
         app.pending_sensitivity.reset();
     else if(read(app.mapping())!=before) SetTimer(app.window,9,120,nullptr);
 }
+std::optional<unsigned> shown_dpi(const App& app) {
+    const bool pending=app.pending_values.contains(0) || (app.busy && app.io_writes_dpi);
+    return pending && app.desired_dpi?app.desired_dpi:app.device.values[0];
+}
+void refresh_pointer_dpi(App& app) {
+    if(app.page!=pointer || app.busy || app.waiting_agent || app.waiting_stop || !app.pending_values.empty())return;
+    // Entering the page and opening its panel often happen in one click sequence.
+    if(!app.device.dpi_sampled_at || GetTickCount64()-app.device.dpi_sampled_at>=1000)io(app,{},0,true);
+}
 bool extended_dpi(App& app) {
-    const auto shown=app.dpi_unconfirmed && app.desired_dpi?app.desired_dpi:app.device.values[0];
+    const auto shown=shown_dpi(app);
     if(shown.value_or(0)>4000)app.dpi_mode=true;
     if(!app.dpi_mode)app.dpi_mode=false;
     return *app.dpi_mode;
 }
 void sync_dpi_control(App& app) {
-    if (app.page!=pointer || app.pane_index!=1 || app.busy || app.dpi_unconfirmed || !app.pending_values.empty() ||
-        !app.dpi_value || !app.slider || GetCapture()==app.slider || !app.device.values[0]) return;
-    const auto value=*app.device.values[0];
+    if (app.page!=pointer || app.pane_index!=1 || app.busy || !app.pending_values.empty() ||
+        !app.dpi_value || !app.slider || GetCapture()==app.slider) return;
+    const auto value=app.device.values[0];
     // Programmatic readback must not enqueue another hardware write.
     const bool was_rendering=app.rendering;
     app.rendering=true;
-    SetWindowTextW(app.dpi_value,(std::to_wstring(value)+L" DPI").c_str());
-    SendMessageW(app.slider,TBM_SETPOS,TRUE,native_dpi::to_percent(value,extended_dpi(app)));
+    SetWindowTextW(app.dpi_value,value?(std::to_wstring(*value)+L" DPI").c_str():L"— DPI");
+    ShowWindow(app.slider,value?SW_SHOWNA:SW_HIDE);
+    if(value)SendMessageW(app.slider,TBM_SETPOS,TRUE,native_dpi::to_percent(*value,extended_dpi(app)));
+    for(unsigned i=0;i<pointer_presets.size();++i) {
+        const auto control=GetDlgItem(app.window,pointer_dpi_800+static_cast<int>(i));
+        if(auto skin=app.button_skins.find(control);skin!=app.button_skins.end() && skin->second.active!=(value==pointer_presets[i])) {
+            skin->second.active=value==pointer_presets[i];
+            InvalidateRect(control,nullptr,FALSE);
+        }
+    }
     if(app.hardware[0])SendMessageW(app.hardware[0],BM_SETCHECK,extended_dpi(app)?BST_CHECKED:BST_UNCHECKED,0);
     InvalidateRect(app.slider,nullptr,FALSE);
     app.rendering=was_rendering;
@@ -1747,6 +1815,14 @@ bool check_agent_startup(App& app,bool timeout) {
     const DWORD started_pid = external ? GetProcessId(app.started) : GetCurrentProcessId();
     const auto status = read_agent_status();
     const bool same_process = status.available && started_pid && status.pid == started_pid;
+    if (app.record_recovery_start && !external && !exited && same_process) {
+        app.record_recovery_start = false;
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        agent_log::agent_message(agent_log::LogLevel::error, stderr,
+            "[%04u-%02u-%02u %02u:%02u:%02u.%03u] Tray recovery acquired background ownership after finding no owner. pid=%lu\n",
+            now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, started_pid);
+    }
     const bool mappings_ready = same_process && !exited && app.native && status.mappings_ready;
     if (!mappings_ready && !exited && !timeout) return false;
     KillTimer(app.window,1);
@@ -1805,7 +1881,10 @@ int pin_at(const App& app,POINT client) {
 }
 Text pointer_summary(const App& app,std::size_t index) {
     const auto& values=app.device.values;
-    if (index==1) return L"速度：" + (values[0]?std::to_wstring(*values[0])+L" DPI":Text(L"—"));
+    if (index==1) {
+        const auto dpi=shown_dpi(app);
+        return L"速度：" + (dpi?std::to_wstring(*dpi)+L" DPI":Text(L"—"));
+    }
     if (index==2) return L"速度：" + std::to_wstring(read_thumb_speed(app)) +
                          L"%\n滚动方向：" + (!values[5]?L"尚未确认":*values[5]?L"已反转":L"默认");
     return Text(L"滚动方向：")+(values[4].value_or(0)?L"反转":L"标准")+
@@ -2047,13 +2126,12 @@ HWND toggle(App& app,const Text& title,bool checked,int id,int y) {
 }
 void hardware_pane(App& app) {
     const auto index=app.pane_index;
-    const auto& values=app.device.values;
     label(app,pointer_points[index].title,1027,17,380,35,app.subheading);
     if (app.official && index!=2)
         label(app,L"检测到官方 Logi 后台正在使用设备，可在「设置」启动设备服务接管。",1027,540,432,48,app.small);
     if (index==1) {
         const auto tr=[&](const wchar_t* zh,const wchar_t* en){return ui_settings::tr(app.ui.language,zh,en);};
-        const auto shown=app.dpi_unconfirmed && app.desired_dpi?app.desired_dpi:values[0];
+        const auto shown=shown_dpi(app);
         label(app,tr(L"使用 8K DPI 传感器更快速、更精准地办公，可调节指针速度和精度以适应高分辨率显示器。",
                      L"Tune 8K sensor DPI and pointer precision to match your display resolution."),
               1027,85,432,44,app.small);
@@ -2064,14 +2142,14 @@ void hardware_pane(App& app) {
         if (!app.device.dpi.empty()) {
             app.slider=add(app,TRACKBAR_CLASSW,tr(L"指针速度",L"Pointer Speed"),TBS_NOTICKS|WS_TABSTOP,1018,236,452,34,dpi_range);
             SendMessageW(app.slider,TBM_SETRANGEMAX,FALSE,100);
-            SendMessageW(app.slider,TBM_SETPOS,TRUE,native_dpi::to_percent(shown.value_or(1000),extended_dpi(app)));
+            if(shown)SendMessageW(app.slider,TBM_SETPOS,TRUE,native_dpi::to_percent(*shown,extended_dpi(app)));
+            else ShowWindow(app.slider,SW_HIDE);
             SendMessageW(app.slider,TBM_SETPAGESIZE,0,10);
         }
         label(app,tr(L"快捷 DPI 预设",L"Quick DPI Presets"),1027,290,260,24,app.small);
-        constexpr unsigned presets[]{800, 1600, 3200, 5000};
-        for (int p = 0; p < 4; ++p) {
-            const bool active_preset = shown && *shown == presets[p];
-            styled_button(app, std::to_wstring(presets[p]), pointer_dpi_800 + p,
+        for (int p = 0; p < static_cast<int>(pointer_presets.size()); ++p) {
+            const bool active_preset = shown == pointer_presets[p];
+            styled_button(app, std::to_wstring(pointer_presets[p]), pointer_dpi_800 + p,
                           1027 + p * 108, 320, 96, 34, {Look::tab, active_preset, {}, {}, {}});
         }
         toggle(app,tr(L"提高指针精确度 (Windows)",L"Enhanced Pointer Precision (Windows)"),windows_pointer_precision(),pointer_precision,374);
@@ -2905,6 +2983,8 @@ void ring_edit_icon(App& app) {
         ring_save_source(app,ring_metadata::write(app.source,settings));
     }
 }
+#include "native_cloud_ui.hpp"
+
 void transfer_config(App& app,bool importing) {
     flush_editor_edits(app);
     if(app.busy||!app.pending_values.empty()||app.pending_reload||app.reload_busy) {
@@ -3211,6 +3291,8 @@ void render(App& app) {
         styled_button(app,tr(L"测试连通",L"Ping Peer"),flow_ping_peer,1094,652,102,38,{Look::plain,false,{},{},{}});
         styled_button(app,tr(L"本地回路自检",L"Loopback Test"),flow_loopback_test,860,702,148,38,{Look::plain,false,{},{},{}});
         styled_button(app,tr(L"重置 Flow",L"Reset Flow"),flow_reset_all,1018,702,120,38,{Look::plain,false,{},{},{}});
+    } else if (app.page==settings && app.cloud_open) {
+        render_cloud(app);
     } else if (app.page==settings) {
         label(app,tr(L"关于",L"About"),340,78,500,24,app.bold);
         label(app,L"MX Master 3S",340,108,500,32,app.subheading);
@@ -3232,6 +3314,7 @@ void render(App& app) {
         styled_button(app,tr(L"高级配置",L"Advanced INI"),advanced,468,552,116,38,{Look::plain,false,{},{},{}});
         styled_button(app,tr(L"导出配置",L"Export"),export_config,340,602,116,38,{Look::plain,false,{},{},{}});
         styled_button(app,tr(L"导入配置",L"Import"),import_config,468,602,116,38,{Look::plain,false,{},{},{}});
+        styled_button(app,tr(L"云同步",L"Cloud sync"),cloud_settings,596,602,124,38,{Look::plain,false,{},{},{}});
         {
             std::error_code ec;
             if (std::filesystem::exists(options_plus_import::default_db_path(), ec))
@@ -3239,6 +3322,14 @@ void render(App& app) {
         }
 
         // Right column: Theme, Language, Autostart, Tray, Primary Button Swap, Notifications
+        label(app,tr(L"后台日志",L"Background logging"),900,648,500,26,app.bold);
+        {
+            constexpr const wchar_t* zh[]{L"关闭",L"仅错误",L"常规",L"详细"};
+            constexpr const wchar_t* en[]{L"Off",L"Errors",L"Normal",L"Detailed"};
+            const auto level=static_cast<unsigned>(ui_settings::log_level_now());
+            for(unsigned i=0;i<4;++i)
+                styled_button(app,tr(zh[i],en[i]),log_level_first+i,900+102*i,681,96,34,{Look::tab,i==level,{},{},{}});
+        }
         label(app,tr(L"外观与语言",L"Appearance & Language"),900,78,500,24,app.bold);
         label(app,tr(L"主题模式",L"Theme"),900,114,200,24);
         styled_button(app,tr(L"跟随系统",L"System"),settings_theme_system,900,146,112,34,{Look::tab,app.ui.theme==ui_settings::Theme::system,{},{},{}});
@@ -3416,6 +3507,8 @@ void select_action(App& app) {
     save_binding(app,false,true,true);
 }
 void navigate(App& app,Page page) {
+    app.cloud_open=false;
+    app.cloud_secret_draft.clear();
     flush_editor_edits(app);
     app.page=page;
     app.pane_index=-1;
@@ -3426,6 +3519,7 @@ void navigate(App& app,Page page) {
     render(app);
     if (page == easy && app.device.hosts.empty() && !app.device.name.empty() && !app.busy)
         io(app);
+    else if(page==pointer)refresh_pointer_dpi(app);
 }
 void click(App& app,int id) {
     flush_editor_edits(app);
@@ -3454,6 +3548,10 @@ void click(App& app,int id) {
         navigate(app,static_cast<Page>(buttons+id-nav_first));
         return;
     }
+    if(id>=log_level_first && id<log_level_first+4) {
+        if(!ui_settings::set_log_level(static_cast<ui_settings::LogLevel>(id-log_level_first)))notice(app,L"无法保存日志级别");
+        render(app);return;
+    }
     if (id>=profiles_first && id<pins_first && static_cast<unsigned>(id-profiles_first)<app.profiles.size()) {
         app.selected=app.profiles[id-profiles_first];
         render(app);
@@ -3467,6 +3565,7 @@ void click(App& app,int id) {
         app.choosing_preset=false; app.gesture_direction=-1;
         update_agents(app);
         render(app);
+        if(app.page==pointer && app.pane_index==1)refresh_pointer_dpi(app);
         return;
     }
     if (id>=gesture_rows_first && id<gesture_rows_first+5) {
@@ -3501,6 +3600,7 @@ void click(App& app,int id) {
         else app.show_custom=!app.show_custom;
         render(app); break;
     case back:
+        if(app.cloud_open){app.cloud_open=false;app.cloud_secret_draft.clear();render(app);break;}
         if(app.ring_creation_stage){app.ring_creation_stage=app.ring_creation_stage==3?2:app.ring_creation_stage-1;render(app);break;}
         if(app.ring_profile_edit){app.ring_profile_edit=0;app.ring_profile_target.clear();render(app);break;}
         if (app.pane_index>=0) {app.pane_index=-1;render(app);}
@@ -3514,6 +3614,9 @@ void click(App& app,int id) {
     case begin: start_agent(app); break;
     case export_config: transfer_config(app,false); break;
     case import_config: transfer_config(app,true); break;
+    case cloud_settings: case cloud_dav: case cloud_google: case cloud_onedrive:
+    case cloud_automatic: case cloud_save: case cloud_run: case cloud_authorize: case cloud_local: case cloud_remote: case cloud_disconnect:
+        click_cloud(app,id);break;
     case end:
         if (stop_agent()==0) {
             app.waiting_agent=false; app.waiting_stop=true; app.timer_checks=0;
@@ -3822,6 +3925,8 @@ void click(App& app,int id) {
         const bool next = !ui_settings::is_windows_autostart_enabled();
         if (ui_settings::set_windows_autostart(next, app.directory))
             notice(app, next ? L"已启用开机自动启动后台服务。" : L"已关闭开机自动启动。");
+        else if (ui_settings::is_windows_autostart_enabled() == next)
+            notice(app, next ? L"已启用登录启动，但未能注册后台恢复任务。" : L"已关闭登录启动，但未能移除后台恢复任务。");
         else
             notice(app, L"写入 Windows 启动项失败。");
         render(app);
@@ -3880,15 +3985,11 @@ void click(App& app,int id) {
         render(app);
         break;
     case pointer_dpi_800: case pointer_dpi_1600: case pointer_dpi_3200: case pointer_dpi_5000: {
-        constexpr unsigned presets[]{800, 1600, 3200, 5000};
-        const unsigned target = presets[id - pointer_dpi_800];
+        const unsigned target = pointer_presets[id - pointer_dpi_800];
         if (target > 4000 && !extended_dpi(app))
             save(app, native_dpi::write_mode(app.source, true));
         const unsigned snapped = app.device.dpi.empty() ? target : native_dpi::supported(target, app.device.dpi);
-        queue_parameter(app, 0, snapped, true);
-        if (app.dpi_value) SetWindowTextW(app.dpi_value, (std::to_wstring(snapped) + L" DPI").c_str());
-        if (app.slider) SendMessageW(app.slider, TBM_SETPOS, TRUE, native_dpi::to_percent(snapped, extended_dpi(app)));
-        notice(app, L"指针速度已设为 " + std::to_wstring(snapped) + L" DPI。");
+        queue_parameter(app, 0, snapped);
         render(app);
         break;
     }
@@ -4793,6 +4894,14 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
         return 0;
     }
     case WM_TIMER:
+        if (wparam == 35) {
+            KillTimer(window, 35);
+            if (!app->closing && !app->ending_session)
+                ui_settings::ensure_recovery_task_for_install(app->directory);
+            return 0;
+        }
+        if(wparam==34){cloud_retry(*app);return 0;}
+        if(wparam==32 || wparam==33){cloud_timer(*app,wparam==32);return 0;}
         if(wparam==9) {save_sensitivity(*app);return 0;}
         if (wparam==8) {
             start_pending_reload(*app);
@@ -4843,6 +4952,9 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
         return 0;
     case WM_COMMAND:
         if (app->rendering) return 0;
+        if(app->cloud_open && HIWORD(wparam)==EN_CHANGE && LOWORD(wparam)>=cloud_endpoint && LOWORD(wparam)<=cloud_password){
+            update_cloud_draft(*app,LOWORD(wparam),reinterpret_cast<HWND>(lparam));return 0;
+        }
         if(app->ring_creation_stage==2&&LOWORD(wparam)==ring_create_search&&HIWORD(wparam)==EN_CHANGE){app->ring_creation_query=control_text(app->search);app->ring_creation_page=0;render(*app);SetFocus(app->search);SendMessageW(app->search,EM_SETSEL,app->ring_creation_query.size(),app->ring_creation_query.size());return 0;}
         if (app->page==buttons && app->show_custom && lparam &&
             std::ranges::find(app->gesture,reinterpret_cast<HWND>(lparam))!=app->gesture.end() &&
@@ -4901,7 +5013,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
             if(app->page==pointer && app->pane_index==1 && LOWORD(wparam)==dpi_extended) {
                 const bool enabled=SendMessageW(control,BM_GETCHECK,0,0)==BST_CHECKED;
                 if(save(*app,native_dpi::write_mode(app->source,enabled))) {
-                    const auto shown=app->dpi_unconfirmed && app->desired_dpi?app->desired_dpi:app->device.values[0];
+                    const auto shown=shown_dpi(*app);
                     if(!enabled && shown.value_or(0)>4000)
                         queue_parameter(*app,0,native_dpi::supported(4000,app->device.dpi));
                 }
@@ -4929,6 +5041,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
         }
         return 0;
     case WM_HSCROLL:
+        if (app->rendering) return 0;
         if (app->slider && reinterpret_cast<HWND>(lparam)==app->slider) {
             if (LOWORD(wparam)==TB_ENDTRACK) {save_sensitivity(*app);sync_dpi_control(*app);return 0;}
             const auto pos=SendMessageW(app->slider,TBM_GETPOS,0,0);
@@ -5016,6 +5129,12 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
             show_tray_menu(*app);
         }
         return 0;
+    case WM_QUERYENDSESSION:
+        app->ending_session = true;
+        return TRUE;
+    case WM_ENDSESSION:
+        app->ending_session = wparam != FALSE;
+        return DefWindowProcW(window, message, wparam, lparam);
     case WM_CLOSE:
         flush_editor_edits(*app);
         save_thumb_speed(*app);
@@ -5025,6 +5144,10 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
             ShowWindow(window, SW_HIDE);
             release_ui_resources(*app);
             return 0;
+        }
+        if (!app->closing && !app->ending_session && ui_settings::current_install_autostarts()
+            && (app->agent_thread_running.load() || !tray_recovery::agent_has_owner())) {
+            tray_recovery::session_exit_marker(tray_recovery::ExitMarker::set);
         }
         app->closing=true;
         start_pending_reload(*app);
@@ -5043,12 +5166,33 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
     }
     return DefWindowProcW(window,message,wparam,lparam);
 }
+
+void open_default_agent_log() {
+    use_gui_agent_log();
+    const auto redirected=GetStdHandle(STD_ERROR_HANDLE);
+    if (redirected && redirected!=INVALID_HANDLE_VALUE && GetFileType(redirected)!=FILE_TYPE_UNKNOWN) return;
+    const auto local=_wgetenv(L"LOCALAPPDATA");
+    if (!local || !*local) return;
+    const auto directory=fs::path(local)/L"LogiNative";
+    std::error_code error;
+    fs::create_directories(directory,error);
+    if (error) return;
+    const auto log=directory/L"agent.log";
+    const auto size=fs::file_size(log,error);
+    if (!error && size>1024*1024) {
+        MoveFileExW(log.c_str(),(directory/L"agent.previous.log").c_str(),MOVEFILE_REPLACE_EXISTING);
+    }
+    // The secure CRT variant denies other processes access while the agent runs.
+    if (auto* stream=_wfreopen(log.c_str(),L"a",stderr)) std::setvbuf(stream,nullptr,_IONBF,0);
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t*,int show) {
     int argc{};
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    const bool start_in_tray = argv && argc == 2 && std::wstring_view(argv[1]) == L"--tray";
+    const auto mode = argv && argc == 2 ? std::wstring_view(argv[1]) : std::wstring_view{};
+    const bool recovery = mode == L"--recover-tray";
+    const bool start_in_tray = recovery || mode == L"--tray";
     const bool cli_mode = argv && argc > 1 && !start_in_tray;
     if (cli_mode) {
         cli_entry::attach_parent_console_if_needed();
@@ -5057,6 +5201,15 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t*,int show) {
         return rc;
     }
     if (argv) LocalFree(argv);
+    if (recovery && !ui_settings::current_install_autostarts()) return 0;
+    tray_recovery::StartupGate startup_gate(recovery);
+    if (!startup_gate.acquired()) return recovery ? 0 : 1;
+    if (recovery) {
+        if (tray_recovery::session_exit_marker(tray_recovery::ExitMarker::read)
+            || tray_recovery::agent_has_owner()) return 0;
+    } else {
+        tray_recovery::session_exit_marker(tray_recovery::ExitMarker::clear);
+    }
     if (const auto existing = FindWindowW(L"LogiNativeDevice", nullptr)) {
         if (!start_in_tray) PostMessageW(existing, show_existing_window, 0, 0);
         return 0;
@@ -5068,6 +5221,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t*,int show) {
     } else if (!loo::show_first_run_notice()) {
         return 0;
     }
+    open_default_agent_log();
     cli_entry::init_agent_hooks();
     struct DaemonShutdownGuard {
         ~DaemonShutdownGuard() { cli_entry::shutdown_agent_hooks(); }
@@ -5075,6 +5229,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t*,int show) {
     {
         App app;
         app.instance = instance;
+        app.record_recovery_start = recovery;
         app.taskbar_created_msg = RegisterWindowMessageW(L"TaskbarCreated");
         RECT work{};
         SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);
@@ -5101,6 +5256,12 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,wchar_t*,int show) {
             width,height,nullptr,nullptr,instance,&app);
         if (!window) return 1;
         app.window=window;
+        startup_gate.release();
+        if (!recovery) SetTimer(window, 35, 5000, nullptr);
+        try {
+            app.cloud_options=config_sync::load_options(app.mapping());
+            if(app.cloud_options.automatic)SetTimer(window,32,60000,nullptr);
+        } catch(const std::exception& e){app.cloud_status=from_utf8(e.what());}
         if (!start_in_tray) {
             apply_ui_theme(app);
             const DWORD corners=2;

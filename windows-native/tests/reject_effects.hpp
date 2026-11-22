@@ -8,6 +8,11 @@
 #ifndef LOGI_CAPTURE_SYSTEM_ACTIONS
 bool system_actions::perform(Action,const ActionContext&) { throw std::runtime_error("unexpected system action"); }
 #endif
+#ifndef LOGI_CAPTURE_VOLUME_STEPS
+system_actions::VolumeResult system_actions::step_output_volume(bool,unsigned,const ActionContext&) {
+    throw std::runtime_error("unexpected output volume action");
+}
+#endif
 #ifndef LOGI_CAPTURE_SCREEN_ACTIONS
 bool screen_capture::capture(Area,Destination,const ActionContext&) { throw std::runtime_error("unexpected screen capture"); }
 #endif

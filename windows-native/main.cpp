@@ -262,6 +262,15 @@ void attach_parent_console_if_needed() {
 int run_cli_main(int argc, wchar_t** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
     const std::wstring_view command = argc > 1 ? argv[1] : L"help";
+    if(command==L"log-level") {
+        if(argc==2){std::wprintf(L"%ls\n",ui_settings::level_names[static_cast<unsigned>(ui_settings::log_level_now())]);return 0;}
+        for(unsigned i=0;argc==3 && i<std::size(ui_settings::level_names);++i)
+            if(std::wstring_view(argv[2])==ui_settings::level_names[i]){
+                if(ui_settings::set_log_level(static_cast<ui_settings::LogLevel>(i))){std::wprintf(L"%ls\n",argv[2]);return 0;}
+                std::fputs("Cannot save log level.\n",stderr);return 2;
+            }
+        std::fputs("Usage: log-level [off|error|info|debug]\n",stderr);return 2;
+    }
     if (command == L"disclaimer" && argc == 2) {
         std::puts(loo::notice_text);
         return 0;
@@ -475,6 +484,7 @@ int run_cli_main(int argc, wchar_t** argv) {
               "  status                      Read first compatible mouse\n"
               "  status-json                 Read mouse settings as JSON\n"
               "  agent-status                Read native and official process state as JSON\n"
+              "  log-level [off|error|info|debug]  Read or change background logging\n"
               "  set <setting> <value>       Set DPI or wheel behavior\n"
               "  hosts                       List Easy-Switch pairing states\n"
               "  hosts-json                  List Easy-Switch pairing states as JSON\n"

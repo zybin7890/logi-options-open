@@ -17,6 +17,9 @@ add_library(logi-core STATIC hidpp.cpp mouse.cpp remap.cpp ring.cpp system_actio
 target_link_libraries(logi-core PUBLIC setupapi hid shell32 advapi32 ole32 oleaut32 uuid wbemuuid dxva2 powrprof gdiplus dwmapi ws2_32 bcrypt)
 
 add_executable(logi-native WIN32 native.cpp smart_native.cpp main.cpp assets.rc)
+target_sources(logi-native PRIVATE config_sync_transport.cpp config_sync_engine.cpp config_sync_webdav.cpp
+    config_sync_drive.cpp config_sync_onedrive.cpp)
+target_link_libraries(logi-native PRIVATE winhttp runtimeobject taskschd)
 target_compile_definitions(logi-native PRIVATE NTDDI_VERSION=0x0A000003)
 target_include_directories(logi-native PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/..>")
 target_link_libraries(logi-native PRIVATE logi-core ole32 dwmapi shlwapi)

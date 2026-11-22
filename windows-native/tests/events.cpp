@@ -9,8 +9,78 @@ static std::string directions="[global]\n0052=A\n0052.left=L\n0052.right=R\n0052
 static Step press(){Step s;s.down=true;return s;}
 static Step move(int x,int y=0){Step s;s.motion=true;s.x=x;s.y=y;return s;}
 static Step release(){return {};}
+static void native_buttons(const std::string& scenario) {
+    const std::string defaults="[global]\n0052=MouseMiddle\n0053=MouseBack\n0056=MouseForward\n";
+    const std::string native=defaults+"[a.exe]\n0052=MouseMiddle\n0052.left=None\n";
+    std::string config=native;
+    std::map<unsigned,unsigned> flags,targets,extended;
+    std::map<unsigned,std::vector<unsigned>> writes;
+    // A self target and a zero target both report the CID's normal HID action.
+    targets[0x53]=0x53;
+    mouse_request_result=[&](logi::Byte feature,logi::Byte function,std::span<const logi::Byte> params)->std::optional<logi::Reply> {
+        if(feature!=7)return {};
+        CHECK(params.size()>=2);
+        const auto cid=logi::word(params);
+        logi::Reply reply{logi::Result::ok};reply.packet.size=20;
+        auto& bytes=reply.packet.bytes;bytes[4]=params[0];bytes[5]=params[1];
+        if(function==3) {
+            CHECK(params.size()==3);
+            const unsigned settings=params[2];
+            writes[cid].push_back(settings);
+            const unsigned mask=(settings>>1)&0x11;
+            flags[cid]=(flags[cid]&~mask)|(settings&mask);
+        } else CHECK(function==2);
+        bytes[6]=static_cast<logi::Byte>(flags[cid]);
+        bytes[7]=logi::high(targets[cid]);bytes[8]=logi::low(targets[cid]);
+        bytes[9]=static_cast<logi::Byte>(extended[cid]);
+        if(scenario=="native-short-report" && cid==0x52)reply.packet.size=7;
+        return reply;
+    };
+    steps={press(),release()};
+    if(scenario=="native-reload") {
+        Step idle;idle.idle=true;
+        steps={press(),release(),idle,press(),release(),idle,press(),release()};
+        before_step=[&](unsigned index) {
+            if(index==1 || index==3)CHECK(writes.empty() && captured.empty());
+            if(index==3 || index==6) {
+                std::ofstream(fixture_path)<<(index==3?defaults+"[a.exe]\n0052=K\n":native);
+                reload_signal=true;
+            }
+            if(index==4)CHECK(flags[0x52]==1);
+            if(index==7)CHECK(flags[0x52]==0);
+        };
+    } else if(scenario=="native-overrides") {
+        config=defaults+"[b.exe]\n0052=None\n0053.right=B\n0056=MouseForward;Wait(20)\n";
+        foreground_app=2;
+        before_step=[&](unsigned){CHECK(flags[0x52]==1 && flags[0x53]==0x11 && flags[0x56]==1);};
+    } else if(scenario=="native-firmware") {
+        targets[0x52]=0x53;flags[0x53]=0x04;extended[0x56]=0x01;
+        before_step=[&](unsigned){CHECK(flags[0x52]==1 && flags[0x53]==5 && flags[0x56]==1);};
+    } else if(scenario=="native-other-device") {
+        configure_mouse=[](logi::Mouse& mouse){mouse.device.name="MX Master 3";};
+        before_step=[&](unsigned){CHECK(flags[0x52]==1 && flags[0x53]==1 && flags[0x56]==1);};
+    } else {
+        CHECK(scenario=="native-short-report");
+        before_step=[&](unsigned){CHECK(flags[0x52]==1 && flags[0x53]==0 && flags[0x56]==0);};
+    }
+    std::ofstream(fixture_path)<<config;
+    CHECK(run_agent(fixture_path.c_str(),false)==0 && connects==1);
+    if(scenario=="native-reload") {
+        CHECK((writes.size()==1 && writes[0x52]==std::vector<unsigned>{0x03,0x22}));
+        CHECK((keyboard(false)==std::vector<WORD>{'K'} && keyboard(true)==std::vector<WORD>{'K'}));
+        CHECK(captured.size()==2);
+    } else if(scenario=="native-overrides") {
+        CHECK(writes.size()==3 && captured.empty());
+    } else {
+        CHECK(mouse_events(MOUSEEVENTF_MIDDLEDOWN)==1 && mouse_events(MOUSEEVENTF_MIDDLEUP)==1);
+        if(scenario=="native-firmware")CHECK(targets[0x52]==0x53 && flags[0x53]==4 && extended[0x56]==1);
+    }
+}
 int main(int argc,char** argv){try{
     CHECK(argc==3);const std::string scenario=argv[1];fixture_path=argv[2];restore_ok=true;mode="gesture-lifecycle";fixture_has_xy=true;
+    if(scenario.starts_with("native-")){
+        native_buttons(scenario);std::cout<<"PASS "<<scenario<<'\n';return 0;
+    }
     std::string config=directions;
     bool foreign_modifier_release{};
     if(scenario=="phase-contract"){
@@ -125,7 +195,7 @@ int main(int argc,char** argv){try{
         unsigned calls{};input_result=[calls,prefix](UINT n,LPINPUT)mutable{return ++calls==1?prefix:n;};
     }
     else if(scenario=="partial-mouse"){
-        fixture_has_xy=false;config="[global]\n0052=MouseMiddle\n";steps={press(),release()};expected={};
+        fixture_has_xy=false;config="[global]\n0052=MouseBack\n";steps={press(),release()};expected={};
         unsigned calls{};input_result=[calls](UINT n,LPINPUT)mutable{return ++calls==1?1u:n;};
     }
     else if(scenario=="failed-cleanup-new-physical-hold"){
@@ -148,7 +218,11 @@ int main(int argc,char** argv){try{
     if(scenario=="partial-keyboard-two"||scenario=="partial-keyboard-three")CHECK((ups==std::vector<WORD>{'A',VK_LCONTROL}));
     if(scenario=="rejected-input")CHECK(ups.empty());
     if(scenario=="physical-modifier")CHECK((ups==std::vector<WORD>{'A'}));
-    if(scenario=="partial-mouse"||scenario=="pan-tap")CHECK(mouse_events(MOUSEEVENTF_MIDDLEDOWN)==1&&mouse_events(MOUSEEVENTF_MIDDLEUP)==1);
+    if(scenario=="partial-mouse"){
+        CHECK(mouse_events(MOUSEEVENTF_XDOWN)==1&&mouse_events(MOUSEEVENTF_XUP)==1);
+        CHECK(captured.size()==2&&captured[0].mi.mouseData==XBUTTON1&&captured[1].mi.mouseData==XBUTTON1);
+    }
+    if(scenario=="pan-tap")CHECK(mouse_events(MOUSEEVENTF_MIDDLEDOWN)==1&&mouse_events(MOUSEEVENTF_MIDDLEUP)==1);
     if(scenario=="pan-progress")CHECK(mouse_events(MOUSEEVENTF_HWHEEL)==2&&mouse_events(MOUSEEVENTF_MIDDLEDOWN)==0&&mouse_events(MOUSEEVENTF_MIDDLEUP)==0);
     if(scenario=="pan-cancel")CHECK(captured.empty());
     if(scenario=="failed-cleanup-new-physical-hold")CHECK(!foreign_modifier_release);
