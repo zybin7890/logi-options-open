@@ -97,6 +97,7 @@ python3 "$source_dir/evdev-to-mutter.py" > "$evidence/gnome-input-transport.log"
 transport_pid=$!
 "$executable" "$@" > >(tee "$evidence/gnome-wayland-test.log") 2>&1
 kill -0 "$transport_pid" # A crashed transport must not count as success.
+python3 "$script_dir/wayland-worker-recovery.py" "$executable" "$evidence" 2>&1 | tee "$evidence/gnome-worker-recovery.log"
 gui_test="$(dirname -- "$executable")/logi-linux-gui-tests"
 if [[ -x "$gui_test" ]]; then
     LOGI_TEST_REQUIRE_NATIVE_WAYLAND=1 "$gui_test" > >(tee "$evidence/gnome-gui-test.log") 2>&1

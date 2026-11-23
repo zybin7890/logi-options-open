@@ -1,8 +1,11 @@
 #include "agent.hpp"
+#include "hid_diversion.hpp"
 #include "desktop.hpp"
 #include "mouse.hpp"
 #include <linux/uinput.h>
 #include <sys/file.h>
+#include <sys/prctl.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -14,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <chrono>
 #include <deque>
 #include <sstream>
@@ -82,6 +86,53 @@ struct Server{
         }return {};
     }
 };
+struct SupervisedWorker {
+    Server& server;
+    int notice;
+    pid_t parent;
+    bool possible_diversion,cleanup_only;
+
+    void notify(char event) const {
+        // Each lifecycle phase is reported at most once. The channel is CLOEXEC.
+        while(send(notice,&event,1,MSG_NOSIGNAL)<0 && errno==EINTR){}
+    }
+};
+SupervisedWorker* supervision{};
+
+struct SupervisorSignals {
+    sigset_t original{};
+    Fd events;
+    bool stopping{};
+    SupervisorSignals(){
+        sigset_t watched{};sigemptyset(&watched);
+        for(int s:{SIGTERM,SIGINT,SIGHUP,SIGCHLD})sigaddset(&watched,s);
+        if(sigprocmask(SIG_BLOCK,&watched,&original)<0)throw std::runtime_error("Cannot block supervisor signals");
+        events=Fd(signalfd(-1,&watched,SFD_NONBLOCK|SFD_CLOEXEC));
+        if(events.value<0){sigprocmask(SIG_SETMASK,&original,nullptr);throw std::runtime_error("Cannot monitor supervisor signals");}
+    }
+    ~SupervisorSignals(){sigprocmask(SIG_SETMASK,&original,nullptr);}
+    void child(){
+        events=Fd{};
+        for(int s:{SIGTERM,SIGINT,SIGHUP})signal(s,signal_stop);
+        sigprocmask(SIG_SETMASK,&original,nullptr);
+    }
+    void wait(int timeout){
+        pollfd event{events.value,POLLIN,0};
+        if(poll(&event,1,timeout)<0 && errno!=EINTR)throw std::runtime_error("Supervisor signal wait failed");
+        signalfd_siginfo info{};
+        while(read(events.value,&info,sizeof(info))==sizeof(info))
+            if(info.ssi_signo!=SIGCHLD)stopping=true;
+    }
+};
+
+int restore_crashed_owner(DeviceBackend& device){
+    if(!device.needs_crash_restore()&&!supervision->possible_diversion)return 0;
+    if(!device.connect(stopped))throw std::runtime_error("Cannot confirm restoration after worker loss: device unavailable");
+    device.restore();device.disconnect();
+    if(device.needs_crash_restore())throw std::runtime_error("Input restoration still pending for the original device");
+    return 0;
+}
+
 class UInput final:public InputSink{
     Fd fd{::open("/dev/uinput",O_WRONLY|O_NONBLOCK|O_CLOEXEC)};bool created{};std::set<unsigned> held;std::string kernel_name;
     void capability(unsigned request,int value){if(ioctl(fd.value,request,value)<0)throw std::runtime_error("uinput capability setup failed");}
@@ -120,9 +171,31 @@ void check_competing_agents(){
     }
 }
 class HidDevice final:public DeviceBackend{
-    std::optional<Mouse> mouse;std::map<unsigned,Byte> original;
-    std::optional<std::pair<Byte,Byte>> original_thumb;WheelInfo wheel_info;
+    std::optional<Mouse> mouse;HidDiversions diversions;WheelInfo wheel_info;
+    bool manage_journal;
     unsigned current_dpi{1000};std::string device_name,cached_status;
+    std::optional<std::uint32_t> device_unit() {
+        const auto index=feature(*mouse->channel,mouse->device.slot,0x0003);
+        if(!index)return {};
+        const auto info=mouse->request(index,0);
+        if(!info || info.packet.data().size()<5)return {};
+        const auto bytes=info.packet.data();
+        const auto id=(std::uint32_t{bytes[1]}<<24)|(std::uint32_t{bytes[2]}<<16)|
+                      (std::uint32_t{bytes[3]}<<8)|bytes[4];
+        if(id==0 || id==UINT32_MAX)return {};
+        return id;
+    }
+    std::optional<unsigned> diversion(unsigned id) {
+        if(id==thumb) {
+            const auto reply=mouse->request(mouse->thumb,1);
+            if(reply && reply.packet.data().size()>=2)return word(reply.packet.data());
+        }else{
+            const auto reply=mouse->request(mouse->buttons,2,{high(id),low(id)});
+            if(reply && reply.packet.data().size()>=3 && word(reply.packet.data())==id)
+                return reply.packet.data()[2]&0x11;
+        }
+        return {};
+    }
     void snapshot(){
         std::ostringstream out;out<<"{\"device\":"<<json(mouse->device.name)<<",\"platform\":\"linux\",\"battery\":";
         auto battery=mouse->request(mouse->battery,mouse->unified_battery?1:0);
@@ -136,25 +209,27 @@ class HidDevice final:public DeviceBackend{
         }out<<"},\"cached\":true}";cached_status=out.str();
     }
 public:
+    explicit HidDevice(bool manage=true):manage_journal(manage){}
     bool connect(std::atomic_bool& stop)override{
         check_competing_agents();mouse=logi::connect(&stop);if(!mouse)return false;
-        if(!device_name.empty()&&device_name!=mouse->device.name&&(!original.empty()||original_thumb)){
+        if(!device_name.empty()&&device_name!=mouse->device.name&&!diversions.empty()){
             mouse.reset();throw std::runtime_error("Waiting for the original device to restore its diverted controls");
         }
         device_name=mouse->device.name;
+        // Do not make the destructor act on a new device if binding its identity fails.
+        try{if(manage_journal)diversions.bind(runtime_dir(),device_unit());}
+        catch(...){mouse.reset();throw;}
         // A disconnect can leave diversion latched: restore our saved flags on
         // the same device before enabling the current mappings again.
         restore();snapshot();return true;
     }
     void disconnect()noexcept override{mouse.reset();}
     void restore()override{
-        if(!mouse){if(!original.empty()||original_thumb)throw std::runtime_error("Device disconnected; saved input state awaits reconnect");return;}
-        bool okay=true;
-        for(auto it=original.begin();it!=original.end();){
-            if(mouse->request(mouse->buttons,3,{high(it->first),low(it->first),it->second}))it=original.erase(it);else{okay=false;++it;}
-        }
-        if(original_thumb){if(mouse->request(mouse->thumb,2,{original_thumb->first,original_thumb->second}))original_thumb.reset();else okay=false;}
-        if(!okay)throw std::runtime_error("Device did not acknowledge input restoration");
+        if(!mouse){if(!diversions.empty())throw std::runtime_error("Device disconnected; saved input state awaits reconnect");return;}
+        diversions.restore([this](unsigned id){return diversion(id);},[this](unsigned id,unsigned value){
+            if(id==thumb)return bool(mouse->request(mouse->thumb,2,{high(value),low(value)}));
+            return bool(mouse->request(mouse->buttons,3,{high(id),low(id),Byte(0x22|value)}));
+        });
     }
     void configure(const Config& config)override{
         if(!mouse)throw std::runtime_error("Mouse is disconnected");
@@ -166,15 +241,15 @@ public:
                 wheel_info.native=word(data);wheel_info.diverted=word(data.subspan(2));
                 if(!wheel_info.native||!wheel_info.diverted)throw std::runtime_error("Invalid thumb wheel resolution");
                 if(mode[0])throw std::runtime_error("Thumb wheel already diverted by another manager; recover input first");
-                original_thumb={{mode[0],mode[1]}};wheel_info.direction=((data[4]&1)!=(mode[1]&1))?1:-1;
+                diversions.remember(id,word(mode),0x0100);wheel_info.direction=((data[4]&1)!=(mode[1]&1))?1:-1;
                 if(!mouse->request(mouse->thumb,2,{1,0}))throw std::runtime_error("Cannot divert thumb wheel");
-                auto checked=mouse->request(mouse->thumb,1);
-                if(!checked||checked.packet.data()[0]!=1)throw std::runtime_error("Thumb diversion was not acknowledged");
+                if(diversion(id)!=0x0100)throw std::runtime_error("Thumb diversion was not acknowledged");
             }else{
                 auto before=mouse->request(mouse->buttons,2,{high(id),low(id)});
                 if(!before||word(before.packet.data())!=id)throw std::runtime_error("Unsupported control: "+std::to_string(id));
                 const auto flags=before.packet.data()[2];if(flags&0x11)throw std::runtime_error("Control already diverted by another manager; recover input first");
-                original.emplace(id,Byte(0x22|(flags&0x11)));const Byte desired=xy?0x33:0x03;
+                const Byte desired=xy?0x33:0x03;
+                diversions.remember(id,flags&0x11,desired&0x11);
                 if(!mouse->request(mouse->buttons,3,{high(id),low(id),desired}))throw std::runtime_error("Cannot divert control");
                 auto checked=mouse->request(mouse->buttons,2,{high(id),low(id)});
                 if(!checked||(checked.packet.data()[2]&0x11)!=(desired&0x11))throw std::runtime_error("Control diversion was not acknowledged");
@@ -203,7 +278,7 @@ public:
         }
         if(command=="recover-input"){
             if(!logi::restore_standard_input(*mouse))throw std::runtime_error("Standard input recovery was not acknowledged");
-            original.clear();original_thumb.reset();return "{\"restored\":true}";
+            return "{\"restored\":true}";
         }
         if(command.starts_with("switch-host ")){
             if(!logi::switch_host(*mouse,number(std::string_view(command).substr(12))))throw std::runtime_error("Host switch failed or pairing unavailable");return "{\"sent\":true}";
@@ -223,6 +298,7 @@ public:
             if(name=="dpi")current_dpi=value;return "{\"setting\":"+json(name)+",\"value\":"+std::to_string(value)+'}';
         }throw std::runtime_error("Unsupported device command");
     }
+    bool needs_crash_restore()const override{return !diversions.empty()||HidDiversions::any_pending(runtime_dir());}
     WheelInfo wheel()const override{return wheel_info;}
     unsigned threshold()const override{return std::max(20u,current_dpi/12);}
     ~HidDevice()override{if(mouse){mouse->channel->finish_shutdown();try{restore();}catch(const std::exception& e){std::fprintf(stderr,"Input restoration pending: %s\n",e.what());}}}
@@ -326,9 +402,12 @@ int preview_ring(const std::filesystem::path& file,const std::string& folder){
     if(!folder.empty()){args.push_back("--folder");args.push_back(folder);}launch(args);return 0;
 }
 int run_with(const std::filesystem::path& config_file,DeviceBackend& device,InputSink& input,RuntimeHooks& hooks){
-    auto config=load(config_file);hooks.validate(config);Server server;
-    stopped=false;signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);
-    bool connected=false,ready=false,quit=false;unsigned revision=1,next_action=1,last_completed=0;
+    if(supervision && supervision->cleanup_only)return restore_crashed_owner(device);
+    auto config=load(config_file);hooks.validate(config);
+    std::optional<Server> standalone;
+    if(!supervision){standalone.emplace();stopped=false;signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);}
+    Server& server=supervision?supervision->server:*standalone;
+    bool connected=false,ready=false,quit=false,reported_device=false;unsigned revision=1,next_action=1,last_completed=0;
     std::string last_error,last_action_error;auto retry=Clock::now();
     auto controls=layout(config);std::map<unsigned,State> state;WheelAccumulator wheel;
     std::deque<Pending> pending;std::map<unsigned,unsigned> held_counts;
@@ -355,14 +434,19 @@ int run_with(const std::filesystem::path& config_file,DeviceBackend& device,Inpu
     std::optional<Request> ending;
     try{
         hooks.configure(config);
+        if(supervision)supervision->notify('R');
         while(!quit&&!stopped.load(std::memory_order_relaxed)){
             while(auto request=server.receive()){
                 const auto& command=request->body;
                 try{
                     std::string response;
-                    if(command=="stop"||command=="recover-input"){ending=std::move(request);quit=true;break;}
+                    if(command=="stop"||command=="recover-input"){
+                        if(supervision)supervision->notify('S');
+                        ending=std::move(request);quit=true;break;
+                    }
                     if(command=="agent-status"||command=="agent-json"){
                         response="{\"native\":true,\"options_plus\":false,\"ready\":"+std::string(ready?"true":"false")+",\"connected\":"+(connected?"true":"false")+
+                            ",\"pid\":"+std::to_string(getpid())+",\"supervisor_pid\":"+std::to_string(supervision?supervision->parent:0)+
                             ",\"state\":"+json(ready?"ready":"reconnecting")+",\"config_revision\":"+std::to_string(revision)+",\"pending_actions\":"+std::to_string(pending.size())+
                             ",\"last_completed_action\":"+std::to_string(last_completed)+",\"last_action_error\":"+json(last_action_error)+",\"last_error\":"+json(last_error)+'}';
                     }else if(command.starts_with("reload ")){
@@ -401,6 +485,7 @@ int run_with(const std::filesystem::path& config_file,DeviceBackend& device,Inpu
                 try{
                     if(device.connect(stopped)){
                         connected=true;
+                        if(supervision && !reported_device){supervision->notify('D');reported_device=true;}
                         try{device.configure(config);ready=true;last_error.clear();}
                         catch(...){try{device.restore();}catch(...){}throw;}
                     }else last_error="Waiting for an accessible HID++ mouse";
@@ -459,18 +544,120 @@ int run_with(const std::filesystem::path& config_file,DeviceBackend& device,Inpu
             }
         }
         cancel("Pending actions cancelled by shutdown");hooks.configure(Config{});
+        const bool signalled=!ending&&stopped.load();
+        // A stop queued on the persistent socket can arrive before this
+        // replacement worker's first device probe. Reclaim and restore first.
+        const bool must_restore=device.needs_crash_restore()||(supervision&&supervision->possible_diversion)
+            ||(ending&&ending->body=="recover-input");
+        if(!connected && (ending||signalled) && must_restore){
+            stopped=false;
+            connected=device.connect(stopped);
+            if(!connected)throw std::runtime_error("Cannot confirm restoration after worker loss: device unavailable");
+        }
         if(connected){
             // Stop cancels reads; restoration still needs an uncancelled device.
             stopped=false;device.restore();if(ending&&ending->body=="recover-input")device.command("recover-input");
         }else if(ending&&ending->body=="recover-input")throw std::runtime_error("Cannot restore input while device is disconnected");
         device.disconnect();
-        if(ending)respond(ending->peer.value,true,ending->body=="recover-input"?"{\"restored\":true,\"stopped\":true}":"{\"stopped\":true}");return 0;
+        if(device.needs_crash_restore())throw std::runtime_error("Input restoration still pending for the original device");
+        if(supervision)supervision->notify('C');
+        if(ending)respond(ending->peer.value,true,ending->body=="recover-input"?"{\"restored\":true,\"stopped\":true}":"{\"stopped\":true}");
+        return supervision&&signalled?75:0;
     }catch(const std::exception& error){
         try{release();}catch(...){}stopped=false;try{device.restore();}catch(...){}device.disconnect();
         if(ending)respond(ending->peer.value,false,error.what());throw;
     }
 }
-int run(const std::filesystem::path& config){auto input=make_uinput_sink();HidDevice device;DesktopHooks hooks(*input);return run_with(config,device,*input,hooks);}
+int run_device(const std::filesystem::path& config,DeviceBackend& device){
+    if(supervision && supervision->cleanup_only)return restore_crashed_owner(device);
+    auto input=make_uinput_sink();DesktopHooks hooks(*input);return run_with(config,device,*input,hooks);
+}
+int supervise(const std::filesystem::path& config,int (*worker)(const std::filesystem::path&)){
+    // One open file description for the exclusive HID lock and one listening
+    // socket survive worker death. Pending clients stay in the kernel backlog.
+    SupervisorSignals signals;Server server;
+    struct ProcessName {
+        char original[16]{};
+        ProcessName(){
+            if(prctl(PR_GET_NAME,original)==0)prctl(PR_SET_NAME,"logi-supervisor");
+        }
+        void restore() const{if(*original)prctl(PR_SET_NAME,original);}
+        ~ProcessName(){restore();}
+    } name;
+    const auto parent=getpid();
+    bool recovering=false,cleanup_only=false,possible_diversion=false;
+    int retry_ms=150,final_error=0;
+    for(;;){
+        int channel[2];
+        if(socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0,channel)<0)
+            throw std::runtime_error("Cannot create worker lifecycle channel");
+        Fd reader(channel[0]),writer(channel[1]);
+        const auto started=Clock::now();
+        const auto child=fork();
+        if(child<0)throw std::runtime_error("Cannot start mouse worker");
+        if(!child){
+            reader=Fd{};
+            // A dead parent must not leave a live HID owner. Check getppid()
+            // after prctl to cover parent death between fork and registration.
+            if(prctl(PR_SET_PDEATHSIG,SIGTERM)<0||getppid()!=parent)_exit(1);
+            name.restore();
+            SupervisedWorker context{server,writer.value,parent,possible_diversion,cleanup_only};
+            supervision=&context;stopped=false;signals.child();
+            try{_exit(worker(config));}
+            catch(const std::exception& e){std::fprintf(stderr,"Mouse worker: %s\n",e.what());_exit(1);}
+        }
+        writer=Fd{};
+        int status{};bool forwarded=false;
+        for(;;){
+            const auto result=waitpid(child,&status,WNOHANG);
+            if(result==child)break;
+            if(result<0 && errno!=EINTR)throw std::runtime_error("Cannot wait for mouse worker");
+            signals.wait(-1);
+            if(signals.stopping&&!forwarded&&!cleanup_only){kill(child,SIGTERM);forwarded=true;}
+        }
+        signals.wait(0);
+        bool initialized=false,requested=false;
+        char note{};
+        while(recv(reader.value,&note,1,0)==1){
+            if(note=='R')initialized=true;
+            if(note=='S')requested=true;
+            if(note=='D')possible_diversion=true;
+            if(note=='C')possible_diversion=false;
+        }
+        const bool exited=WIFEXITED(status);
+        const int code=exited?WEXITSTATUS(status):128+WTERMSIG(status);
+        if(cleanup_only)return final_error?final_error:code;
+        if(requested){
+            if(exited)return code;
+            // A stop was accepted but the worker died while releasing input.
+            // Honour the stop: make one restoration-only attempt, never remap.
+            std::fprintf(stderr,"Mouse worker pid=%ld died during explicit stop; checking input restoration.\n",
+                         static_cast<long>(child));
+            cleanup_only=true;continue;
+        }
+        if(exited&&code==0)return 0;
+        if(signals.stopping&&exited&&code==75)return 0;
+        if(exited && code!=75 && !initialized){
+            // Bad configuration, unavailable uinput or unsupported desktop:
+            // report once. If a prior worker crashed, restore its journal.
+            if(!recovering)return code;
+            cleanup_only=true;final_error=code;continue;
+        }
+        if(Clock::now()-started>std::chrono::seconds(10))retry_ms=150;
+        if(!signals.stopping){
+            std::fprintf(stderr,"Mouse worker pid=%ld exited (status=%d); retrying in %d ms.\n",
+                         static_cast<long>(child),code,retry_ms);
+            const auto due=Clock::now()+std::chrono::milliseconds(retry_ms);
+            while(!signals.stopping&&Clock::now()<due)
+                signals.wait(static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(due-Clock::now()).count()));
+            retry_ms=std::min(retry_ms*2,2000);
+        }
+        recovering=true;cleanup_only=signals.stopping;
+    }
+}
+int run(const std::filesystem::path& config){
+    return supervise(config,[](const std::filesystem::path& path){HidDevice device;return run_device(path,device);});
+}
 std::string dispatch(const std::string& command){
     if(running())return transact(command);
     // A status probe does not access HID and need not take device ownership.
@@ -481,7 +668,7 @@ std::string dispatch(const std::string& command){
     try{lock=acquire_lock();}catch(...){if(running())return transact(command);throw;}
     if(command=="stop")return "{\"stopped\":true}";
     if(command.starts_with("reload "))throw std::runtime_error("Linux daemon is not running");
-    stopped=false;signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);HidDevice device;
+    stopped=false;signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);HidDevice device(command=="recover-input");
     if(!device.connect(stopped))throw std::runtime_error("No accessible HID++ mouse; check hidraw permissions and connection");
     if(command.starts_with("play-actions ")){
         auto sequence=load_actions(std::filesystem::path(command.substr(13)));auto input=make_uinput_sink();DesktopHooks hooks(*input);

@@ -68,7 +68,8 @@ static void dpi() {
     fail_read=true;CHECK(!execute(toggle,&mouse)&&writes==2);fail_read=false;
     fail_write=true;CHECK(!execute(toggle,&mouse)&&current==1000&&writes==3&&saves==2&&!dpi_restored);fail_write=false;
     fail_save=true;CHECK(!execute(toggle,&mouse)&&current==5000&&desired_dpi==5000&&!desired_dpi_saved&&!dpi_restored);fail_save=false;
-    CHECK(restore_owner_dpi(agent_mapping,mouse)&&desired_dpi_saved&&current==5000);
+    std::optional<unsigned> observed;
+    CHECK(restore_owner_dpi(agent_mapping,mouse,observed)&&desired_dpi_saved&&observed==current&&current==5000);
     Mappings mappings;Binding binding{{},0x52,Gesture::tap,{toggle}};Sequences sequences{{},mappings};
     sequences.before_dpi=[&]{++before;};sequences.after_dpi=[&](std::optional<unsigned> value){++after;CHECK(value==current);};
     CHECK(Sequences::needs_mouse(Sequences::Run{&binding}));

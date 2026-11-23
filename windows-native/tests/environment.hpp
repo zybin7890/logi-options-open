@@ -16,7 +16,10 @@
 #define CHECK(x) do {if(!(x))throw std::runtime_error(#x);}while(0)
 static bool stopped,restore_ok;
 static std::atomic<unsigned> foreground_app{1};
+static unsigned hovered_app{},hovered_root{},blocked_wheel_app{};
+static std::wstring second_app_name;
 static std::function<void(unsigned)> before_step;
+static std::function<void()> observe_lastinput;
 static std::function<unsigned(UINT,LPINPUT)> input_result;
 static std::function<void(DWORD)> after_sleep;
 static std::function<void(HANDLE,DWORD)> observe_wait;
@@ -55,6 +58,7 @@ static std::string reload_bytes;
 static bool reload_failed_ready{};
 static std::filesystem::path saved_path;
 static DWORD input_stamp=100;
+static bool use_input_stamp{};
 static LONG first_pid{},last_pid{},observed_failures{},observed_connections{};
 static LONG64 observed_checked{},idle_age{};
 alignas(16) static unsigned char health_buffer[1024];
@@ -64,7 +68,8 @@ alignas(16) static unsigned char settings_buffer[8192];
 static LONG speed_buffer;
 static unsigned created_events;
 HANDLE WINAPI fake_mutex(LPSECURITY_ATTRIBUTES,BOOL,LPCWSTR){return reinterpret_cast<HANDLE>(11);}
-DWORD WINAPI fake_error(){return 0;}
+static thread_local DWORD fixture_last_error{};
+DWORD WINAPI fake_error(){return fixture_last_error;}
 HANDLE WINAPI fake_snapshot(DWORD,DWORD){return reinterpret_cast<HANDLE>(12);}
 BOOL WINAPI fake_processfirst(HANDLE,LPPROCESSENTRY32W){return FALSE;}
 BOOL WINAPI fake_processnext(HANDLE,LPPROCESSENTRY32W){return FALSE;}
@@ -83,14 +88,18 @@ BOOL WINAPI fake_handler(PHANDLER_ROUTINE,BOOL){return TRUE;}
 DWORD WINAPI fake_wait(HANDLE h,DWORD duration){if(observe_wait)observe_wait(h,duration);if(h==reinterpret_cast<HANDLE>(11))return WAIT_OBJECT_0;if(h==reinterpret_cast<HANDLE>(102)&&reload_signal)return WAIT_OBJECT_0;return h==reinterpret_cast<HANDLE>(101)&&stopped?WAIT_OBJECT_0:WAIT_TIMEOUT;}
 BOOL WINAPI fake_release_mutex(HANDLE){return TRUE;}
 ULONGLONG WINAPI fake_clock(){return tick;}
-BOOL WINAPI fake_lastinput(PLASTINPUTINFO input){input->dwTime=mode=="idle-resume"?input_stamp:static_cast<DWORD>(tick);return TRUE;}
+BOOL WINAPI fake_lastinput(PLASTINPUTINFO input){if(observe_lastinput)observe_lastinput();input->dwTime=mode=="idle-resume"||use_input_stamp?input_stamp:static_cast<DWORD>(tick);return TRUE;}
 BOOL WINAPI fake_peek(LPMSG,HWND,UINT,UINT,UINT){return FALSE;}
 UINT WINAPI fake_input(UINT n,LPINPUT input,int){const auto accepted=input_result?input_result(n,input):n;CHECK(accepted<=n);captured.insert(captured.end(),input,input+accepted);for(unsigned i=0;i<accepted;++i)capture_times.push_back(tick);return accepted;}
 HWND WINAPI fake_foreground(){return reinterpret_cast<HWND>(static_cast<uintptr_t>(foreground_app));}
+BOOL WINAPI fake_cursor_pos(LPPOINT point){*point={};return TRUE;}
+HWND WINAPI fake_window_from_point(POINT){return hovered_app?reinterpret_cast<HWND>(static_cast<uintptr_t>(hovered_app)):fake_foreground();}
+HWND WINAPI fake_root_window(HWND window,UINT kind){CHECK(kind==GA_ROOT);return hovered_root?reinterpret_cast<HWND>(static_cast<uintptr_t>(hovered_root)):window;}
+static bool fake_wheel_output_allowed(DWORD pid){return blocked_wheel_app!=pid;}
 static std::atomic<DWORD> foreground_pid_override{};
 DWORD WINAPI fake_window_pid(HWND window,LPDWORD pid){const auto override_pid=foreground_pid_override.load();*pid=override_pid?override_pid:static_cast<DWORD>(reinterpret_cast<uintptr_t>(window));return *pid;}
 HANDLE WINAPI fake_open_process(DWORD,BOOL,DWORD pid){return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(1000+pid));}
-BOOL WINAPI fake_process_path(HANDLE handle,DWORD,LPWSTR path,PDWORD size){const auto pid=reinterpret_cast<uintptr_t>(handle)-1000;const wchar_t* name=pid==1?(fixture_app_name.empty()?L"C:\\Apps\\a.exe":fixture_app_name.c_str()):L"C:\\Apps\\b.exe";const auto n=std::wcslen(name);CHECK(*size>n);std::wcscpy(path,name);*size=static_cast<DWORD>(n);return TRUE;}
+BOOL WINAPI fake_process_path(HANDLE handle,DWORD,LPWSTR path,PDWORD size){const auto pid=reinterpret_cast<uintptr_t>(handle)-1000;const wchar_t* name=pid==1?(fixture_app_name.empty()?L"C:\\Apps\\a.exe":fixture_app_name.c_str()):(second_app_name.empty()?L"C:\\Apps\\b.exe":second_app_name.c_str());const auto n=std::wcslen(name);CHECK(*size>n);std::wcscpy(path,name);*size=static_cast<DWORD>(n);return TRUE;}
 SHORT WINAPI fake_key(int key){return key>=0&&key<256&&physical_keys[key]?SHORT(0x8000):0;}
 static bool allow_open,fail_open;
 HINSTANCE WINAPI fake_shell(HWND,LPCWSTR,LPCWSTR,LPCWSTR,LPCWSTR,INT){CHECK(allow_open);if(fail_open)return reinterpret_cast<HINSTANCE>(31);foreground_app=2;return reinterpret_cast<HINSTANCE>(33);}
@@ -125,6 +134,10 @@ BOOL WINAPI fake_keyboard_unhook(HHOOK){return TRUE;}
 #define PeekMessageW fake_peek
 #define SendInput fake_input
 #define GetForegroundWindow fake_foreground
+#define GetCursorPos fake_cursor_pos
+#define WindowFromPoint fake_window_from_point
+#define GetAncestor fake_root_window
+#define wheel_output_allowed fake_wheel_output_allowed
 #define GetWindowThreadProcessId fake_window_pid
 #define OpenProcess fake_open_process
 #define QueryFullProcessImageNameW fake_process_path
@@ -149,10 +162,10 @@ static std::function<bool(logi::Mouse&,std::wstring_view,unsigned)> set_override
 static std::function<bool(const std::filesystem::path&,const logi::Mouse&,unsigned)> remember_dpi_override;
 static std::function<int()> ring_choice;
 int choose_ring_action(std::span<const std::wstring>,HANDLE,bool,std::span<const RingIcon>,float){CHECK(ring_choice);return ring_choice();}
-struct Step {bool down{};int x{};bool motion{},change{},loss{};ULONGLONG at{};bool thumb{};int y{};unsigned app{};bool disconnect{},stop{},main_wheel{},idle{};unsigned wheel_flags{0x11};int wheel_delta{1};};
+struct Step {bool down{};int x{};bool motion{},change{},loss{};ULONGLONG at{};bool thumb{};int y{};unsigned app{};bool disconnect{},stop{},main_wheel{},idle{};unsigned wheel_flags{0x11};int wheel_delta{1};int thumb_delta{1};unsigned thumb_phase{};};
 static std::vector<Step> steps;
 namespace logi {
-Channel::Channel(const Interface&,HANDLE){}
+Channel::Channel(const Interface&,HANDLE):handle_(reinterpret_cast<HANDLE>(1)),event_(reinterpret_cast<HANDLE>(2)){}
 Channel::~Channel(){}
 void Channel::finish_shutdown(){control_active_=false;control_result_.reset();discard_notifications();pending_loss_=0;}
 bool Channel::cancel_control(){
@@ -177,7 +190,7 @@ Reply Channel::read(DWORD timeout,bool,HANDLE){
  if(control_active_&&cancel_delayed&&tick<async_due){CHECK(timeout!=0);++nonzero_cancel_waits;tick=async_due;return {Result::control};}
  if(control_active_&&input_index<steps.size()&&steps[input_index].at>=async_due&&steps[input_index].at!=0){tick=async_due;return {Result::control};}
  if(control_active_ && (tick>=async_due || input_index>=steps.size())){tick=std::max(tick,async_due);return {Result::control};}
- ++read_calls;CHECK(health);observed_ready=health->ready;observed_mappings=health->mappings_ready;observed_settings=health->settings_ready;
+  ++read_calls;CHECK(health);if(mode=="ready-publication")CHECK(keep_notifications_);observed_ready=health->ready;observed_mappings=health->mappings_ready;observed_settings=health->settings_ready;
  observed_checked=health->checked;observed_failures=health->failures;observed_connections=health->connections;last_pid=health->pid;
  if(mode=="reconnect" && read_calls==1){first_pid=health->pid;return {Result::io_error};}
  if(mode=="idle-resume") {
@@ -232,7 +245,9 @@ Reply Channel::read(DWORD timeout,bool,HANDLE){
      if(mode=="gesture-watchdog-loss"&&input_index==3)tick=8100;
      Reply r{Result::ok};r.packet.size=20;r.packet.bytes[0]=0x11;r.packet.bytes[1]=1;r.packet.bytes[2]=s.thumb?6:7;r.packet.bytes[3]=s.motion?0x10:0;
      if(s.main_wheel){r.packet.bytes[2]=5;r.packet.bytes[4]=static_cast<Byte>(s.wheel_flags);r.packet.bytes[5]=high(s.wheel_delta);r.packet.bytes[6]=low(s.wheel_delta);return r;}
-     auto value=s.thumb?1u:s.motion?unsigned(s.x):(s.down?0x52u:0u);r.packet.bytes[4]=high(value);r.packet.bytes[5]=low(value);if(s.motion){r.packet.bytes[6]=high(unsigned(s.y));r.packet.bytes[7]=low(unsigned(s.y));}return r;
+     auto value=s.thumb?unsigned(s.thumb_delta):s.motion?unsigned(s.x):(s.down?0x52u:0u);r.packet.bytes[4]=high(value);r.packet.bytes[5]=low(value);if(s.motion){r.packet.bytes[6]=high(unsigned(s.y));r.packet.bytes[7]=low(unsigned(s.y));}
+     if(s.thumb)r.packet.bytes[8]=static_cast<Byte>(s.thumb_phase);
+     return r;
  }
  if((mode=="retry"||mode=="reporting")&&read_calls==1){tick=3100;return {Result::timeout};}
  stopped=true;return {Result::stopped};
@@ -273,12 +288,13 @@ Result Channel::send(Byte,Byte,Byte,std::initializer_list<Byte>,DWORD) {
  if(mode=="owner-window-released"||mode=="reload-window-released")push(false,false,0);
  return Result::ok;
 }
-std::optional<Mouse> connect(HANDLE,bool){++connects;if(accept_connection&&!accept_connection(connects))return {};if(mode.starts_with("reload-")&&connects==2){CHECK(health&&health->mappings_ready==0);reload_failed_ready=true;report_button=0;}if(mode=="reconnect" && connects==2)CHECK(health && health->ready==0 && health->mappings_ready==0 && health->pid==first_pid);Mouse m{};m.device={1,2,0,"MX Master 3S"};m.buttons=7;m.dpi=9;if(mode=="async-wheel-cancel"||mode=="async-past-wheel")m.shift=8;if(mode=="async-repair-thumb")m.thumb=6;m.dpi_choices={1000,5000};m.channel=std::make_unique<Channel>(Interface{});if(configure_mouse)configure_mouse(m);return m;}
-bool restore_standard_input(Mouse&){return true;}
+#ifndef LOGI_TEST_REAL_MOUSE
+std::optional<Mouse> connect(HANDLE,bool,bool,discovery::OwnerSearch*){++connects;if(accept_connection&&!accept_connection(connects))return {};if(mode.starts_with("reload-")&&connects==2){CHECK(health&&health->mappings_ready==0);reload_failed_ready=true;report_button=0;}if(mode=="reconnect" && connects==2)CHECK(health && health->ready==0 && health->mappings_ready==0 && health->pid==first_pid);Mouse m{};m.device={1,2,0,"MX Master 3S"};m.buttons=7;m.dpi=9;if(mode=="async-wheel-cancel"||mode=="async-past-wheel")m.shift=8;if(mode=="async-repair-thumb")m.thumb=6;m.dpi_choices={1000,5000};m.channel=std::make_unique<Channel>(Interface{});if(configure_mouse)configure_mouse(m);return m;}
+bool restore_standard_input(Mouse&,StandardReporting*,std::optional<ControlCatalog>*){return true;}
 #ifndef LOGI_TEST_SETTINGS_SNAPSHOT
 bool switch_host(Mouse&,unsigned){return true;}
 #endif
-bool restore_saved_dpi(const std::filesystem::path&,Mouse&){++restores;return restore_ok||(mode=="retry"&&restores>1)||(mode=="reconnect"&&connects>1);}
+bool restore_saved_dpi(const std::filesystem::path&,Mouse&,std::optional<unsigned>&){++restores;return restore_ok||(mode=="retry"&&restores>1)||(mode=="reconnect"&&connects>1);}
 bool read_saved_settings(const std::filesystem::path&,const Mouse&,SavedSettings&){return true;}
 bool remember_settings(const std::filesystem::path&,const Mouse&,const SavedSettings&){return true;}
 std::optional<unsigned> get(Mouse& mouse,std::wstring_view key){
@@ -316,8 +332,9 @@ Reply Mouse::request(Byte feature,Byte function,std::initializer_list<Byte> para
  ++requests;CHECK(feature==7 && (function==2||function==3));CHECK(parameters.size()>=2);
  Reply r{Result::ok};r.packet.size=20;r.packet.bytes[4]=*parameters.begin();r.packet.bytes[5]=*(parameters.begin()+1);r.packet.bytes[6]=fixture_xy()?0x11:1;return r;
 }
+std::optional<unsigned> number(std::wstring_view text,int base){wchar_t* end;std::wstring copy(text);auto v=wcstoul(copy.c_str(),&end,base);return *end?std::optional<unsigned>{}:std::optional<unsigned>{unsigned(v)};}
+#endif
 unsigned word(std::span<const Byte> b){return (unsigned(b[0])<<8)|b[1];}
 Byte high(unsigned n){return static_cast<Byte>(n>>8);}
 Byte low(unsigned n){return static_cast<Byte>(n);}
-std::optional<unsigned> number(std::wstring_view text,int base){wchar_t* end;std::wstring copy(text);auto v=wcstoul(copy.c_str(),&end,base);return *end?std::optional<unsigned>{}:std::optional<unsigned>{unsigned(v)};}
 }

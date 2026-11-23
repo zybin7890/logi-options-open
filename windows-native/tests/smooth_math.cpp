@@ -23,6 +23,17 @@ int main(){try{
     CHECK(axis.feed(-130,300,false)==-120);CHECK(axis.feed(10,400,false)==0);CHECK(!axis.active());
     axis.reset();axis.feed(120,100,true);axis.feed(-120,100,true);CHECK(axis.tick(110)==0);CHECK(!axis.active());
     axis.feed(120,200,true);axis.reset();CHECK(axis.tick(210)==0);CHECK(!axis.active());
+    // Reverse a fine adjustment before its first tail finishes.
+    axis.feed(15,1000,true);int reversed=axis.tick(1010)+axis.tick(1020);
+    CHECK(reversed>0);
+    axis.feed(-15,1020,true);
+    for(unsigned t=1030;t<=1140;t+=10){int output=axis.tick(t);CHECK(output<=0);reversed+=output;}
+    CHECK(reversed==0&&!axis.active());
+    // A suspended event pump must not replay old motion against a page.
+    axis.feed(120,2000,true);CHECK(axis.tick(2500)==0&&!axis.active());
+    axis.feed(120,3000,true);axis.feed(-120,3500,true);
+    int fresh{};for(unsigned t=3510;t<=3620;t+=10)fresh+=axis.tick(t);
+    CHECK(fresh==-120&&!axis.active());
     const std::array<std::uint8_t,3> high{0x13,0xff,0xf8},low{0x01,0,1},bad{0x81,0,1};
     const auto h=decode(high,8,false),i=decode(high,8,true),l=decode(low,8,false);
     CHECK(h&&h->units==-120&&h->periods==3&&h->high_resolution);CHECK(i&&i->units==120);

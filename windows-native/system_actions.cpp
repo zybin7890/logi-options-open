@@ -32,19 +32,25 @@ struct Value {
     VARIANT data{};
     ~Value(){VariantClear(&data);}
 };
-bool microphone(const ActionContext& context) {
-    ComScope scope;if(!scope)return false;
+HRESULT default_volume(EDataFlow flow,Com<IAudioEndpointVolume>& endpoint) {
     IMMDeviceEnumerator* raw{};
-    if(FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator),nullptr,CLSCTX_ALL,
-                              __uuidof(IMMDeviceEnumerator),reinterpret_cast<void**>(&raw))))return false;
+    auto hr=CoCreateInstance(__uuidof(MMDeviceEnumerator),nullptr,CLSCTX_ALL,
+                             __uuidof(IMMDeviceEnumerator),reinterpret_cast<void**>(&raw));
+    if(FAILED(hr))return hr;
     Com<IMMDeviceEnumerator> enumerator(raw);
     IMMDevice* device_raw{};
-    if(FAILED(enumerator->GetDefaultAudioEndpoint(eCapture,eConsole,&device_raw)))return false;
+    hr=enumerator->GetDefaultAudioEndpoint(flow,eConsole,&device_raw);
+    if(FAILED(hr))return hr;
     Com<IMMDevice> device(device_raw);
     IAudioEndpointVolume* endpoint_raw{};
-    if(FAILED(device->Activate(__uuidof(IAudioEndpointVolume),CLSCTX_ALL,nullptr,
-                              reinterpret_cast<void**>(&endpoint_raw))))return false;
-    Com<IAudioEndpointVolume> endpoint(endpoint_raw);
+    hr=device->Activate(__uuidof(IAudioEndpointVolume),CLSCTX_ALL,nullptr,reinterpret_cast<void**>(&endpoint_raw));
+    if(SUCCEEDED(hr))endpoint.reset(endpoint_raw);
+    return hr;
+}
+bool microphone(const ActionContext& context) {
+    ComScope scope;if(!scope)return false;
+    Com<IAudioEndpointVolume> endpoint;
+    if(FAILED(default_volume(eCapture,endpoint)))return false;
     BOOL muted{};
     return SUCCEEDED(endpoint->GetMute(&muted)) && context.active() && SUCCEEDED(endpoint->SetMute(!muted,nullptr));
 }
@@ -162,6 +168,26 @@ bool monitor_brightness(bool up,const ActionContext& context) {
     DestroyPhysicalMonitors(count,physical.data());
     return accepted;
 }
+}
+VolumeResult step_output_volume(bool up,unsigned count,const ActionContext& context) {
+    if(!context.active())return {0,E_ABORT};
+    ComScope scope;
+    if(!scope)return {0,scope.result};
+    Com<IAudioEndpointVolume> endpoint;
+    VolumeResult result{0,default_volume(eRender,endpoint)};
+    while(SUCCEEDED(result.status)&&result.completed<count) {
+        if(!context.active()){result.status=E_ABORT;break;}
+        result.status=up?endpoint->VolumeStepUp(nullptr):endpoint->VolumeStepDown(nullptr);
+        if(SUCCEEDED(result.status))++result.completed;
+    }
+    if(result.completed&&context.active()) {
+        float scalar{};BOOL mute{};
+        if(SUCCEEDED(endpoint->GetMasterVolumeLevelScalar(&scalar))&&scalar>=0&&scalar<=1) {
+            result.percent=static_cast<int>(scalar*100+.5f);
+            result.muted=SUCCEEDED(endpoint->GetMute(&mute))&&mute;
+        }
+    }
+    return result;
 }
 bool perform(Action action,const ActionContext& context) {
     if(!context.active())return false;

@@ -16,6 +16,7 @@
 BOOL WINAPI slow_post(HWND,UINT,WPARAM,LPARAM);
 #define PostMessageW slow_post
 #define LOGI_CAPTURE_SYSTEM_ACTIONS
+#define LOGI_CAPTURE_VOLUME_STEPS
 #define LOGI_CAPTURE_SCREEN_ACTIONS
 #include "environment.hpp"
 

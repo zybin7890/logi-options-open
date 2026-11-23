@@ -11,6 +11,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -34,8 +35,11 @@ inline std::filesystem::path cache_directory() {
 }
 inline std::vector<Item> enumerate() {
     const auto base=local_data();if(base.empty())return {};
-    const auto directory=base/L"Logi"/L"LogiPluginService"/L"Media"/L"Icons"/L"DefaultIcons";
-    std::error_code error;std::vector<Item> result;
+    std::error_code error;
+    auto directory=base/L"LogiNative"/L"DefaultIcons";
+    if(!std::filesystem::exists(directory,error))
+        directory=base/L"Logi"/L"LogiPluginService"/L"Media"/L"Icons"/L"DefaultIcons";
+    std::vector<Item> result;
     for(std::filesystem::directory_iterator it(directory,error),end;!error&&it!=end;it.increment(error)) {
         if(it->is_regular_file(error)&&it->path().extension()==L".svg")
             result.push_back({it->path().stem().wstring(),it->path().wstring()});
@@ -46,21 +50,39 @@ inline std::vector<Item> enumerate() {
 // One instance belongs to the open icon editor; closing it releases the renderer.
 // The background mouse agent neither enumerates the library nor creates a D3D device.
 class Rasterizer {
+    HMODULE d3d11_dll_{};
+    HMODULE d2d1_dll_{};
     ComPtr<ID2D1DeviceContext5> context_;
+    std::unordered_map<std::wstring,std::filesystem::path> cached_paths_;
     CLSID encoder_{};
     bool encoder_ready_{};
     bool initialize() {
-        if(context_)return true;
-        ComPtr<ID3D11Device> d3d;
-        if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&d3d,nullptr,nullptr)))return false;
-        ComPtr<IDXGIDevice> dxgi;ComPtr<ID2D1Factory1> factory;
-        ComPtr<ID2D1Device> device;ComPtr<ID2D1DeviceContext> context;
-        if(FAILED(d3d.As(&dxgi))||FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
-           __uuidof(ID2D1Factory1),nullptr,reinterpret_cast<void**>(factory.GetAddressOf())))||
-           FAILED(factory->CreateDevice(dxgi.Get(),&device))||
-           FAILED(device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,&context))||
-           FAILED(context.As(&context_)))return false;
+        if(context_&&encoder_ready_)return true;
+        if(!d3d11_dll_)d3d11_dll_=LoadLibraryW(L"d3d11.dll");
+        if(!d2d1_dll_)d2d1_dll_=LoadLibraryW(L"d2d1.dll");
+        if(!d3d11_dll_||!d2d1_dll_)return false;
+        if(!context_) {
+            using D3D11CreateDeviceFn=HRESULT(WINAPI*)(IDXGIAdapter*,D3D_DRIVER_TYPE,HMODULE,UINT,
+                CONST D3D_FEATURE_LEVEL*,UINT,UINT,ID3D11Device**,D3D_FEATURE_LEVEL*,ID3D11DeviceContext**);
+            using D2D1CreateFactoryFn=HRESULT(WINAPI*)(D2D1_FACTORY_TYPE,REFIID,CONST D2D1_FACTORY_OPTIONS*,void**);
+            D3D11CreateDeviceFn create_d3d{};
+            D2D1CreateFactoryFn create_d2d{};
+            const auto d3d_proc=GetProcAddress(d3d11_dll_,"D3D11CreateDevice");
+            const auto d2d_proc=GetProcAddress(d2d1_dll_,"D2D1CreateFactory");
+            if(!d3d_proc||!d2d_proc)return false;
+            std::memcpy(&create_d3d,&d3d_proc,sizeof(create_d3d));
+            std::memcpy(&create_d2d,&d2d_proc,sizeof(create_d2d));
+            ComPtr<ID3D11Device> d3d;
+            if(FAILED(create_d3d(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&d3d,nullptr,nullptr)))return false;
+            ComPtr<IDXGIDevice> dxgi;ComPtr<ID2D1Factory1> factory;
+            ComPtr<ID2D1Device> device;ComPtr<ID2D1DeviceContext> context;
+            if(FAILED(d3d.As(&dxgi))||FAILED(create_d2d(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+               __uuidof(ID2D1Factory1),nullptr,reinterpret_cast<void**>(factory.GetAddressOf())))||
+               FAILED(factory->CreateDevice(dxgi.Get(),&device))||
+               FAILED(device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,&context))||
+               FAILED(context.As(&context_)))return false;
+        }
         UINT count{},bytes{};
         if(Gdiplus::GetImageEncodersSize(&count,&bytes)!=Gdiplus::Ok)return false;
         std::vector<unsigned char> buffer(bytes);
@@ -72,12 +94,16 @@ class Rasterizer {
         return encoder_ready_;
     }
 public:
+    ~Rasterizer() {
+        context_.Reset();
+        if(d2d1_dll_)FreeLibrary(d2d1_dll_);
+        if(d3d11_dll_)FreeLibrary(d3d11_dll_);
+    }
     std::filesystem::path rasterize(const Item& item,const std::filesystem::path& directory) {
         if(directory.empty())return {};
-        static std::unordered_map<std::wstring,std::filesystem::path> cached_paths;
         const auto cache_key=directory.wstring()+L"|"+item.path;
         std::error_code error;
-        if(const auto found=cached_paths.find(cache_key);found!=cached_paths.end()&&std::filesystem::is_regular_file(found->second,error))
+        if(const auto found=cached_paths_.find(cache_key);found!=cached_paths_.end()&&std::filesystem::is_regular_file(found->second,error))
             return found->second;
         std::ifstream input(std::filesystem::path(item.path),std::ios::binary|std::ios::ate);
         if(!input)return {};
@@ -89,7 +115,7 @@ public:
         std::uint64_t hash=14695981039346656037ull;
         for(const auto byte:xml){hash^=byte;hash*=1099511628211ull;}
         const auto output=directory/(L"svg-mask-v2-256-"+std::to_wstring(hash)+L".png");
-        if(std::filesystem::is_regular_file(output,error)){cached_paths[cache_key]=output;return output;}
+        if(std::filesystem::is_regular_file(output,error)){cached_paths_[cache_key]=output;return output;}
         if(!initialize()||!encoder_ready_)return {};
         std::filesystem::create_directories(directory,error);if(error)return {};
         // Give the document a pixel viewport while keeping its original viewBox.
@@ -127,7 +153,7 @@ public:
         readback->Unmap();
         Gdiplus::Bitmap bitmap(side,side,side*4,PixelFormat32bppARGB,pixels.data());
         if(bitmap.GetLastStatus()!=Gdiplus::Ok||bitmap.Save(output.c_str(),&encoder_,nullptr)!=Gdiplus::Ok)return {};
-        cached_paths[cache_key]=output;
+        cached_paths_[cache_key]=output;
         return output;
     }
 };

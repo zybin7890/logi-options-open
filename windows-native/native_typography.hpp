@@ -8,6 +8,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -74,6 +75,7 @@ struct LayoutCacheEntry {
 };
 
 struct WriteFonts {
+    HMODULE dwrite_dll{};
     Com<IDWriteFactory3> factory;
     Com<IDWriteFontCollection1> originals;
     Com<IDWriteFontCollection> system;
@@ -81,12 +83,19 @@ struct WriteFonts {
     Com<IDWriteRenderingParams> rendering;
     Com<IDWriteBitmapRenderTarget> target;
     UINT target_width{}, target_height{};
-    std::array<LayoutCacheEntry, 256> layout_cache{};
+    std::array<LayoutCacheEntry, 32> layout_cache{};
     std::size_t layout_cache_next{};
 
     explicit WriteFonts(const std::filesystem::path& directory) {
-        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory3),
-                                      reinterpret_cast<IUnknown**>(factory.put())))) return;
+        dwrite_dll = LoadLibraryW(L"dwrite.dll");
+        if (!dwrite_dll) return;
+        using DWriteCreateFactoryFn = HRESULT (WINAPI*)(DWRITE_FACTORY_TYPE, REFIID, IUnknown**);
+        DWriteCreateFactoryFn create_dwrite{};
+        const FARPROC proc = GetProcAddress(dwrite_dll, "DWriteCreateFactory");
+        if (!proc) return;
+        std::memcpy(&create_dwrite, &proc, sizeof(create_dwrite));
+        if (FAILED(create_dwrite(DWRITE_FACTORY_TYPE_ISOLATED, __uuidof(IDWriteFactory3),
+                                 reinterpret_cast<IUnknown**>(factory.put())))) return;
         auto* base = static_cast<IDWriteFactory*>(factory.get());
         base->GetSystemFontCollection(system.put(), FALSE);
         base->GetGdiInterop(interop.put());
@@ -103,6 +112,16 @@ struct WriteFonts {
         }
         Com<IDWriteFontSet> set;
         if (SUCCEEDED(builder->CreateFontSet(set.put()))) factory->CreateFontCollectionFromFontSet(set.get(), originals.put());
+    }
+    ~WriteFonts() {
+        for (auto& entry : layout_cache) entry.layout = {};
+        target = {};
+        rendering = {};
+        interop = {};
+        originals = {};
+        system = {};
+        factory = {};
+        if (dwrite_dll) FreeLibrary(dwrite_dll);
     }
 };
 

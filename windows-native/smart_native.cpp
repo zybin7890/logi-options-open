@@ -2,6 +2,7 @@
 #include "remap.hpp"
 #include "native_icons.hpp"
 #include "native_typography.hpp"
+#include "lazy_win32.hpp"
 #include "smart_steps_layout.hpp"
 #include "smart_system_macros.hpp"
 #include "smart_templates.hpp"
@@ -1151,6 +1152,7 @@ struct Editor {
     std::wstring application_step;
     int detail_choice{-1}, detail_profile{}, detail_hover{-1};
     std::vector<Application> applications;
+    std::vector<std::pair<std::wstring, std::wstring>> cached_entries;
     std::vector<size_t> detail_items;
     std::vector<HWND> application_tiles;
     int application_scroll{}, selected_application{-1};
@@ -1251,44 +1253,20 @@ int smart_text(HDC dc, const wchar_t* value, int length, RECT* rect, UINT flags)
 }
 
 void smart_card_text(HDC dc, const wchar_t* value, RECT rect, UINT flags, bool active) {
-    if (active) { smart_text(dc, value, -1, &rect, flags); return; }
-    // Original .macros-card.deactivated text uses opacity:.6. Rasterizing a new
-    // gray ClearType glyph is different: its edge contrast is recomputed and
-    // looks embossed. Keep the active glyph coverage and composite it instead.
-    const int width = rect.right - rect.left, height = rect.bottom - rect.top;
-    if (width <= 0 || height <= 0 || !*value) return;
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(info.bmiHeader);
-    info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
-    info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
-    void* storage{};
-    const auto memory = CreateCompatibleDC(dc);
-    const auto bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &storage, nullptr, 0);
-    if (!memory || !bitmap) { if (memory) DeleteDC(memory); if (bitmap) DeleteObject(bitmap); return; }
-    const auto previous = SelectObject(memory, bitmap);
-    BitBlt(memory, 0, 0, width, height, dc, rect.left, rect.top, SRCCOPY);
-    GdiFlush();
-    auto* pixels = static_cast<DWORD*>(storage);
-    const std::vector<DWORD> backdrop(pixels, pixels + static_cast<size_t>(width) * height);
-    const auto font = reinterpret_cast<HFONT>(GetCurrentObject(dc, OBJ_FONT));
-    native_typography::drawText(memory, font, GetTextColor(dc), value, {0, 0, width, height}, flags);
-    GdiFlush();
-    for (size_t i = 0; i < backdrop.size(); ++i) {
-        DWORD blended = pixels[i] & 0xff000000u;
-        for (unsigned shift = 0; shift < 24; shift += 8) {
-            const auto ink = (pixels[i] >> shift) & 0xffu, under = (backdrop[i] >> shift) & 0xffu;
-            blended |= ((ink * 3 + under * 2 + 2) / 5) << shift;
-        }
-        pixels[i] = blended;
+    if (!*value) return;
+    const auto previous = GetTextColor(dc);
+    if (!active) {
+        const auto blend = [](unsigned channel) { return (channel * 3 + 37 * 2 + 2) / 5; };
+        SetTextColor(dc, RGB(blend(GetRValue(previous)), blend(GetGValue(previous)), blend(GetBValue(previous))));
     }
-    BitBlt(dc, rect.left, rect.top, width, height, memory, 0, 0, SRCCOPY);
-    SelectObject(memory, previous); DeleteObject(bitmap); DeleteDC(memory);
+    smart_text(dc, value, -1, &rect, flags);
+    if (!active) SetTextColor(dc, previous);
 }
 
 LRESULT CALLBACK static_text(HWND window, UINT message, WPARAM parameter, LPARAM payload,
                              UINT_PTR id, DWORD_PTR) {
     if (message == WM_SETTEXT) {
-        const auto result = DefSubclassProc(window, message, parameter, payload);
+        const auto result = lazy_win32::def_subclass_proc(window, message, parameter, payload);
         // STATIC can paint synchronously inside WM_SETTEXT. Finish every text
         // update through our background clear and DirectWrite paint path.
         if (IsWindowVisible(window))
@@ -1314,8 +1292,8 @@ LRESULT CALLBACK static_text(HWND window, UINT message, WPARAM parameter, LPARAM
         if (message == WM_PAINT) EndPaint(window, &paint);
         return 0;
     }
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, static_text, id);
-    return DefSubclassProc(window, message, parameter, payload);
+    if (message == WM_NCDESTROY) lazy_win32::remove_window_subclass(window, static_text, id);
+    return lazy_win32::def_subclass_proc(window, message, parameter, payload);
 }
 
 LRESULT CALLBACK edit_selection(HWND window, UINT message, WPARAM parameter, LPARAM payload,
@@ -1326,8 +1304,8 @@ LRESULT CALLBACK edit_selection(HWND window, UINT message, WPARAM parameter, LPA
         return 0;
     }
     if (writable && message == WM_CHAR && parameter == 1) return 0;
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, edit_selection, id);
-    return DefSubclassProc(window, message, parameter, payload);
+    if (message == WM_NCDESTROY) lazy_win32::remove_window_subclass(window, edit_selection, id);
+    return lazy_win32::def_subclass_proc(window, message, parameter, payload);
 }
 
 HWND widget(Editor& editor, const wchar_t* type, const wchar_t* text, DWORD style,
@@ -1338,8 +1316,8 @@ HWND widget(Editor& editor, const wchar_t* type, const wchar_t* text, DWORD styl
                                     GetModuleHandleW(nullptr), nullptr);
     SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(same(type, L"EDIT") ? editor.input_font : editor.font), FALSE);
     if (same(type, L"STATIC") && (style & SS_TYPEMASK) != SS_OWNERDRAW)
-        SetWindowSubclass(child, static_text, 5, 0);
-    if (same(type, L"EDIT")) SetWindowSubclass(child, edit_selection, 6, 0);
+        lazy_win32::set_window_subclass(child, static_text, 5, 0);
+    if (same(type, L"EDIT")) lazy_win32::set_window_subclass(child, edit_selection, 6, 0);
     return child;
 }
 
@@ -1426,22 +1404,22 @@ LRESULT CALLBACK choice_control(HWND window, UINT message, WPARAM parameter, LPA
         paint_choice(editor, window, reinterpret_cast<HDC>(parameter));
         return 0;
     }
-    const auto result = DefSubclassProc(window, message, parameter, payload);
+    const auto result = lazy_win32::def_subclass_proc(window, message, parameter, payload);
     if (message == WM_SETFOCUS || message == WM_KILLFOCUS || message == CB_SETCURSEL ||
         message == CB_RESETCONTENT || message == CB_SHOWDROPDOWN || message == WM_LBUTTONUP ||
         message == WM_KEYUP) InvalidateRect(window, nullptr, FALSE);
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, choice_control, id);
+    if (message == WM_NCDESTROY) lazy_win32::remove_window_subclass(window, choice_control, id);
     return result;
 }
 
 HWND combo(Editor& editor, int x, int y, int w, WORD id) {
     const auto control = widget(editor, L"COMBOBOX", L"", CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED |
                                 CBS_HASSTRINGS | WS_TABSTOP | WS_VSCROLL, x, y, w, 280, id);
-    SetWindowTheme(control, L"", L"");
+    lazy_win32::set_window_theme(control, L"", L"");
     SendMessageW(control, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), px(editor, 32));
     SendMessageW(control, CB_SETITEMHEIGHT, 0, px(editor, 34));
     SendMessageW(control, CB_SETDROPPEDWIDTH, px(editor, std::max(w, 220)), 0);
-    SetWindowSubclass(control, choice_control, 1, reinterpret_cast<DWORD_PTR>(&editor));
+    lazy_win32::set_window_subclass(control, choice_control, 1, reinterpret_cast<DWORD_PTR>(&editor));
     return control;
 }
 
@@ -1840,7 +1818,7 @@ LRESULT CALLBACK step_surface(HWND window, UINT message, WPARAM parameter, LPARA
     }
     if (message == WM_GETDLGCODE) {
         const auto* key = reinterpret_cast<const MSG*>(payload);
-        return DefSubclassProc(window, message, parameter, payload) | DLGC_WANTARROWS |
+        return lazy_win32::def_subclass_proc(window, message, parameter, payload) | DLGC_WANTARROWS |
             (key && (key->wParam == VK_RETURN || key->wParam == VK_ESCAPE) ? DLGC_WANTMESSAGE : 0);
     }
     if (message == WM_KEYDOWN) {
@@ -1876,9 +1854,9 @@ LRESULT CALLBACK step_surface(HWND window, UINT message, WPARAM parameter, LPARA
         editor.step_press = editor.step_drag_index = -1; editor.step_dragging = false;
         editor.step_drag_original.clear();
         if (editor.step_ghost) { DestroyWindow(editor.step_ghost); editor.step_ghost = nullptr; }
-        RemoveWindowSubclass(window, step_surface, id);
+        lazy_win32::remove_window_subclass(window, step_surface, id);
     }
-    return DefSubclassProc(window, message, parameter, payload);
+    return lazy_win32::def_subclass_proc(window, message, parameter, payload);
 }
 
 void layout_editor(Editor& editor) {
@@ -2008,7 +1986,7 @@ void show_action_fields(Editor& editor, std::wstring_view step = {}) {
 
 LRESULT CALLBACK text_cue(HWND window, UINT message, WPARAM parameter, LPARAM payload,
                           UINT_PTR id, DWORD_PTR context) {
-    const auto result = DefSubclassProc(window, message, parameter, payload);
+    const auto result = lazy_win32::def_subclass_proc(window, message, parameter, payload);
     if (message == WM_GETDLGCODE && payload) {
         const auto* key = reinterpret_cast<const MSG*>(payload);
         if (key->message == WM_KEYDOWN &&
@@ -2029,7 +2007,7 @@ LRESULT CALLBACK text_cue(HWND window, UINT message, WPARAM parameter, LPARAM pa
         SelectObject(dc, previous);
         ReleaseDC(window, dc);
     }
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, text_cue, id);
+    if (message == WM_NCDESTROY) lazy_win32::remove_window_subclass(window, text_cue, id);
     return result;
 }
 
@@ -2062,7 +2040,7 @@ void open_text_editor(Editor& editor) {
                                294, 282, 906, 278, text_value_id);
     SendMessageW(editor.text_value, EM_SETLIMITTEXT, 1000, 0);
     capture_keys(editor.text_value);
-    SetWindowSubclass(editor.text_value, text_cue, 2, 0);
+    lazy_win32::set_window_subclass(editor.text_value, text_cue, 2, 0);
     const auto before_confirm = GetWindow(confirm, GW_HWNDPREV);
     SetWindowPos(editor.text_value, before_confirm ? before_confirm : HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -2189,8 +2167,8 @@ LRESULT CALLBACK keys_capture(HWND window, UINT message, WPARAM parameter, LPARA
         return 0;
     }
     if (editor.recording && up) return 0;
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, keys_capture, id);
-    return DefSubclassProc(window, message, parameter, payload);
+    if (message == WM_NCDESTROY) lazy_win32::remove_window_subclass(window, keys_capture, id);
+    return lazy_win32::def_subclass_proc(window, message, parameter, payload);
 }
 
 void add_application(Editor& editor, std::wstring name, std::wstring path) {
@@ -2202,11 +2180,10 @@ void add_application(Editor& editor, std::wstring name, std::wstring path) {
 
 void discover_applications(Editor& editor) {
     if (!editor.applications.empty()) return;
-    static std::vector<std::pair<std::wstring, std::wstring>> cached_entries;
-    if (cached_entries.empty()) {
+    if (editor.cached_entries.empty()) {
         const auto append_cached = [&](std::wstring name, std::wstring path) {
-            if (path.empty() || std::ranges::any_of(cached_entries, [&](const auto& item) { return same(item.second, path); })) return;
-            cached_entries.emplace_back(std::move(name), std::move(path));
+            if (path.empty() || std::ranges::any_of(editor.cached_entries, [&](const auto& item) { return same(item.second, path); })) return;
+            editor.cached_entries.emplace_back(std::move(name), std::move(path));
         };
         const auto initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         for (const auto folder : {CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS}) {
@@ -2239,12 +2216,12 @@ void discover_applications(Editor& editor) {
         }
         for (const auto& identity : application_identities)
             if (const auto path = resolve_application_id(identity.id); !path.empty()) append_cached(identity.name, path);
-        std::sort(cached_entries.begin(), cached_entries.end(), [](const auto& a, const auto& b) {
+        std::sort(editor.cached_entries.begin(), editor.cached_entries.end(), [](const auto& a, const auto& b) {
             return CompareStringOrdinal(a.first.c_str(), -1, b.first.c_str(), -1, TRUE) == CSTR_LESS_THAN;
         });
         if (SUCCEEDED(initialized)) CoUninitialize();
     }
-    for (const auto& [name, path] : cached_entries) add_application(editor, name, path);
+    for (const auto& [name, path] : editor.cached_entries) add_application(editor, name, path);
 }
 
 void layout_application_tiles(Editor& editor) {
@@ -2324,7 +2301,7 @@ void select_system_parameter(Editor& editor) {
     SendMessageW(editor.system_parameter, WM_SETFONT, reinterpret_cast<WPARAM>(editor.input_font), FALSE);
     SendMessageW(editor.system_parameter, EM_SETLIMITTEXT, 2048, 0);
     SendMessageW(editor.system_parameter, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(code == L"@OpenWebPage" ? L"输入 URL" : L"选择路径"));
-    SetWindowSubclass(editor.system_parameter, edit_selection, 6, 0);
+    lazy_win32::set_window_subclass(editor.system_parameter, edit_selection, 6, 0);
     if (code != L"@OpenWebPage") {
         editor.system_browse = CreateWindowW(L"BUTTON", L"浏览", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             0, 0, 1, 1, editor.detail_list, reinterpret_cast<HMENU>(system_browse_id), GetModuleHandleW(nullptr), nullptr);
@@ -2416,8 +2393,8 @@ LRESULT CALLBACK choice_hover(HWND window, UINT message, WPARAM parameter, LPARA
         }
         if (message == WM_MOUSEMOVE) { TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window, 0}; TrackMouseEvent(&track); }
     }
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, choice_hover, id);
-    const auto result = DefSubclassProc(window, message, parameter, payload);
+    if (message == WM_NCDESTROY) lazy_win32::remove_window_subclass(window, choice_hover, id);
+    const auto result = lazy_win32::def_subclass_proc(window, message, parameter, payload);
     if (message == WM_VSCROLL || message == WM_MOUSEWHEEL || message == WM_KEYDOWN || message == WM_SIZE)
         layout_system_parameter(editor);
     return result;
@@ -2490,7 +2467,7 @@ void open_detail(Editor& editor, Detail detail) {
                                               LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
                                            413, 257, 668, 288, detail_list_id);
         SendMessageW(editor.detail_list, LB_SETITEMHEIGHT, 0, px(editor, 40));
-        SetWindowSubclass(editor.detail_list, keys_capture, 3, reinterpret_cast<DWORD_PTR>(&editor));
+        lazy_win32::set_window_subclass(editor.detail_list, keys_capture, 3, reinterpret_cast<DWORD_PTR>(&editor));
         editor.detail_status = detail_widget(editor, L"STATIC", L"您的击键将显示在此处。按“开始录制”开始。", SS_LEFT,
                                              421, 269, 640, 28, detail_status_id);
         editor.detail_advanced = detail_widget(editor, L"BUTTON", L"高级", WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -2513,11 +2490,11 @@ void open_detail(Editor& editor, Detail detail) {
         editor.detail_list = detail_widget(editor, L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_CLIPCHILDREN | LBS_NOTIFY |
                                                LBS_NOINTEGRALHEIGHT | (detail == Detail::system ? LBS_OWNERDRAWVARIABLE : LBS_OWNERDRAWFIXED) | LBS_HASSTRINGS,
                                            563, 338, 368, 254, detail_list_id);
-        SetWindowTheme(editor.detail_list, L"DarkMode_Explorer", nullptr);
+        lazy_win32::set_window_theme(editor.detail_list, L"DarkMode_Explorer", nullptr);
         SendMessageW(editor.detail_list, LB_SETITEMHEIGHT, 0, px(editor, 38));
         if (detail == Detail::system)
             SetWindowLongPtrW(editor.detail_list, GWL_EXSTYLE, GetWindowLongPtrW(editor.detail_list, GWL_EXSTYLE) | WS_EX_CONTROLPARENT);
-        SetWindowSubclass(editor.detail_list, choice_hover, 4, reinterpret_cast<DWORD_PTR>(&editor));
+        lazy_win32::set_window_subclass(editor.detail_list, choice_hover, 4, reinterpret_cast<DWORD_PTR>(&editor));
         editor.detail_confirm = detail_button(editor, L"确认", 563, 604, 368, 40, detail_confirm_id);
         editor.detail_cancel = detail_button(editor, L"取消", 563, 654, 368, 40, detail_cancel_id);
         if (detail == Detail::application_action) {
@@ -2557,7 +2534,7 @@ void open_detail(Editor& editor, Detail detail) {
         editor.detail_description = detail_widget(editor, L"EDIT", editor.description.c_str(),
             WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 540, 428, 416, 44, detail_description_id);
         SendMessageW(editor.detail_description, EM_SETLIMITTEXT, 80, 0);
-        SetWindowSubclass(editor.detail_description, text_cue, 2, reinterpret_cast<DWORD_PTR>(L"说明"));
+        lazy_win32::set_window_subclass(editor.detail_description, text_cue, 2, reinterpret_cast<DWORD_PTR>(L"说明"));
         editor.detail_name_counter = detail_widget(editor, L"STATIC", L"", SS_RIGHT, 901, 371, 55, 20);
         editor.detail_description_counter = detail_widget(editor, L"STATIC", L"", SS_RIGHT, 901, 473, 55, 20);
         editor.detail_cancel = detail_button(editor, L"取消", 528, 520, 212, 48, detail_cancel_id);
@@ -2844,7 +2821,7 @@ void window_header(Editor& editor, const wchar_t* caption) {
 
 LRESULT CALLBACK filter_cue(HWND window, UINT message, WPARAM parameter, LPARAM payload,
                            UINT_PTR id, DWORD_PTR) {
-    const auto result = DefSubclassProc(window, message, parameter, payload);
+    const auto result = lazy_win32::def_subclass_proc(window, message, parameter, payload);
     if (message == WM_PAINT && !GetWindowTextLengthW(window)) {
         const auto dc = GetDC(window);
         RECT bounds{};
@@ -2858,7 +2835,7 @@ LRESULT CALLBACK filter_cue(HWND window, UINT message, WPARAM parameter, LPARAM 
         ReleaseDC(window, dc);
     }
     if (message == WM_SETFOCUS || message == WM_KILLFOCUS) InvalidateRect(window, nullptr, TRUE);
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, filter_cue, id);
+    if (message == WM_NCDESTROY) lazy_win32::remove_window_subclass(window, filter_cue, id);
     return result;
 }
 
@@ -2879,7 +2856,7 @@ void list_screen(Editor& editor) {
     editor.filter = widget(editor, L"EDIT", L"", WS_TABSTOP | WS_CLIPSIBLINGS | ES_AUTOHSCROLL,
                            948, 51, 227, 23, filter_id);
     SetWindowPos(editor.filter, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    SetWindowSubclass(editor.filter, filter_cue, 1, 0);
+    lazy_win32::set_window_subclass(editor.filter, filter_cue, 1, 0);
     if (editor.show_education) {
         widget(editor, L"STATIC", L"", SS_OWNERDRAW, 446, 122, 840, 100, education_id);
         widget(editor, L"STATIC", editor.templates_view ? L"在此选项卡上，您可以找到 Smart Actions 模板。选择“获取”，选择所需应用程序或文件，再按需要自定义操作并保存。" : L"在此选项卡上，可以管理您的 Smart Actions。使用“创建”按钮添加动作，设置触发器并组合操作。您也可以导入或导出 Smart Actions 文件，与朋友和同事分享自己的动作。",
@@ -2976,7 +2953,7 @@ void editor_screen(Editor& editor) {
                          LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
                          491, 552, 500, 134, list_id);
     SendMessageW(editor.list, LB_SETITEMHEIGHT, 0, px(editor, smart_steps::row_height));
-    SetWindowSubclass(editor.list, step_surface, 7, reinterpret_cast<DWORD_PTR>(&editor));
+    lazy_win32::set_window_subclass(editor.list, step_surface, 7, reinterpret_cast<DWORD_PTR>(&editor));
     editor.action_type = combo(editor, 491, 587, 150, action_type_id);
     for (auto title : step_names) add_choice(editor.action_type, title);
     editor.action_title = label(editor, L"", 650, 553, 341);
@@ -3201,12 +3178,6 @@ void toggle_recording(Editor& editor) {
 }
 
 void browse_application(Editor& editor) {
-    const auto library = LoadLibraryW(L"comdlg32.dll");
-    if (!library) return;
-    const auto address = GetProcAddress(library, "GetOpenFileNameW");
-    decltype(&GetOpenFileNameW) picker{};
-    static_assert(sizeof(picker) == sizeof(address));
-    std::memcpy(&picker, &address, sizeof(picker));
     wchar_t filename[MAX_PATH]{};
     OPENFILENAMEW data{};
     data.lStructSize = sizeof(data);
@@ -3215,8 +3186,7 @@ void browse_application(Editor& editor) {
     data.lpstrFile = filename;
     data.nMaxFile = std::size(filename);
     data.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (picker && picker(&data)) SetWindowTextW(editor.action_value, filename);
-    FreeLibrary(library);
+    if (lazy_win32::get_open_file_name(&data)) SetWindowTextW(editor.action_value, filename);
 }
 
 void restore(Config& config, const Entry& entry) {
@@ -3331,7 +3301,7 @@ void export_entry(Editor& editor, const Entry& entry) {
     dialog.lpstrFile = filename;
     dialog.nMaxFile = std::size(filename);
     dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (!GetSaveFileNameW(&dialog)) return;
+    if (!lazy_win32::get_save_file_name(&dialog)) return;
     GUID id{};
     wchar_t identifier[40]{};
     if (FAILED(CoCreateGuid(&id)) || !StringFromGUID2(id, identifier, std::size(identifier))) {
@@ -3350,7 +3320,7 @@ void import_entry(Editor& editor) {
     dialog.lpstrFile = filename;
     dialog.nMaxFile = std::size(filename);
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (!GetOpenFileNameW(&dialog)) return;
+    if (!lazy_win32::get_open_file_name(&dialog)) return;
     const auto bytes = read_file(filename);
     if (!bytes) { hint(editor, L"无法读取导入文件。"); return; }
     auto json = wide(*bytes);
@@ -4041,7 +4011,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM parameter, LPARAM
                     dialog.lStructSize = sizeof(dialog); dialog.hwndOwner = window;
                     dialog.lpstrFilter = L"应用程序 (*.exe)\0*.exe\0\0"; dialog.lpstrFile = filename;
                     dialog.nMaxFile = std::size(filename); dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-                    if (GetOpenFileNameW(&dialog)) {
+                    if (lazy_win32::get_open_file_name(&dialog)) {
                         add_application(*editor, std::filesystem::path(filename).stem().wstring(), filename);
                         if (editor->template_target >= 0) { complete_template_target(*editor, filename); return 0; }
                         const auto found = std::ranges::find_if(editor->applications, [&](const auto& app) { return same(app.path, filename); });
@@ -4403,4 +4373,5 @@ void show_smart_actions(HWND owner, const std::filesystem::path& directory) {
     DeleteObject(editor.step_number_font);
     DeleteObject(editor.backdrop);
     DeleteObject(editor.fill);
+    CoFreeUnusedLibraries();
 }

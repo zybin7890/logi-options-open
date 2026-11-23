@@ -307,30 +307,36 @@ Reply Channel::request(Byte slot, Byte feature, Byte function,
     return {Result::timeout};
 }
 
-Byte feature(Channel& channel, Byte slot, unsigned id) {
-    const auto reply = channel.request(slot, 0, 0, {high(id), low(id)});
+Byte feature(Channel& channel, Byte slot, unsigned id, DWORD timeout) {
+    const auto reply = channel.request(slot, 0, 0, {high(id), low(id)},timeout);
     return reply && !(reply.packet.data()[1] & 0x80) ? reply.packet.data()[0] : 0;
 }
 
-std::optional<Device> probe(Channel& channel, Byte slot) {
-    constexpr Byte challenge = 0x6D;
-    const auto ping = channel.request(slot, 0, 1, {0, 0, challenge}, 1250);
+std::optional<Device> probe(Channel& channel, Byte slot,DWORD ping_timeout,bool with_name) {
+    static thread_local Byte sequence=0x6C;
+    const Byte challenge=++sequence;
+    const auto ping = channel.request(slot, 0, 1, {0, 0, challenge}, ping_timeout);
     if (!ping || ping.packet.data()[2] != challenge || ping.packet.data()[0] < 2 ||
         ping.packet.data()[0] == 0x8F) return std::nullopt;
 
     Device device{slot, ping.packet.data()[0], ping.packet.data()[1], {}};
-    const auto name = feature(channel, slot, 0x0005);
-    if (!name) return device;
-    const auto length = channel.request(slot, name, 0);
-    if (!length) return device;
-    while (device.name.size() < length.packet.data()[0]) {
-        const auto chunk = channel.request(slot, name, 1, {static_cast<Byte>(device.name.size())});
-        if (!chunk) break;
-        const auto bytes = chunk.packet.data();
-        const auto count = std::min(bytes.size(), length.packet.data()[0] - device.name.size());
-        device.name.append(reinterpret_cast<const char*>(bytes.data()), count);
-    }
+    if(with_name)device.name=read_device_name(channel,slot,true);
     return device;
+}
+std::string read_device_name(Channel& channel, Byte slot,bool allow_partial) {
+    const auto name = feature(channel, slot, 0x0005);
+    if (!name) return {};
+    const auto length = channel.request(slot, name, 0);
+    if (!length || length.packet.data().empty()) return {};
+    std::string result;
+    while (result.size() < length.packet.data()[0]) {
+        const auto chunk = channel.request(slot, name, 1, {static_cast<Byte>(result.size())});
+        if (!chunk || chunk.packet.data().empty())return allow_partial?result:std::string{};
+        const auto bytes = chunk.packet.data();
+        const auto count = std::min(bytes.size(), length.packet.data()[0] - result.size());
+        result.append(reinterpret_cast<const char*>(bytes.data()), count);
+    }
+    return result;
 }
 
 unsigned word(std::span<const Byte> data) { return (unsigned{data[0]} << 8) | data[1]; }

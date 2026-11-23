@@ -90,6 +90,8 @@ Linux 默认用户配置：`$XDG_CONFIG_HOME/logi-options-open/mappings.ini`，�
 
 Linux 需要读写对应的 Logitech hidraw 设备及 `/dev/uinput`。参考 [Linux 说明](linux/README.md) 的设备权限和功能边界；不要用 `chmod 666` 开放所有输入设备。程序不自动提权，不自动终止其他鼠标软件。
 
+从设置中启动后台或运行 `logi-cli run` 后，监督进程会在映射进程意外退出时重新加载配置。运行 `logi-cli agent-status` 可分别查看映射进程的 `pid`、监督进程的 `supervisor_pid` 和设备就绪状态 `ready`。要主动退出后台，可点设置中的“停止后台”或运行 `logi-cli stop`。
+
 ## 导入与导出配置
 
 在“设置”页选择“导出配置”或“导入配置”。Windows 原生候选与共享 Qt 界面使用同一种 INI 备份：保留全部按键、应用配置、手势、Smart Actions 和动作环，以及界面已读取的 DPI、SmartShift、滚轮模式、方向和高分辨率参数。备份中的参数写在注释头内，普通旧 INI 也可导入。

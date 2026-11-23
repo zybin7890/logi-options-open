@@ -34,6 +34,16 @@ jobs:
             build/test-evidence/
       - name: Package
         run: cd build && cpack
+      - name: Test the extracted Linux trial
+        run: |
+          set -eu
+          set -- build/logi-options-open-*.tar.gz
+          test "$#" -eq 1
+          trial=$(mktemp -d)
+          tar -xzf "$1" -C "$trial" --strip-components=1
+          export XDG_CONFIG_HOME="$trial/test-config"
+          "$trial/bin/logi-cli" check-config "$trial/share/logi-options-open/default-linux.ini"
+          xvfb-run -a "$trial/bin/logi-options-open" --self-test
       - uses: actions/upload-artifact@v4
         with:
           name: logi-options-open-linux-x64
@@ -147,12 +157,19 @@ jobs:
       - name: Run windows-native CTest suite
         run: |
           ctest --test-dir build-win32 --output-on-failure -V
-          ./build-win32/logi-cli.exe check-config ./build-win32/mappings.ini
+          ./build-win32/logi-native.exe check-config ./build-win32/mappings.ini
+      - name: Verify first-use notice on the fresh runner
+        run: |
+          exe=./build-win32/logi-native.exe
+          status=0
+          "$exe" check-disclaimer || status=$?
+          test "$status" -eq 2
+          "$exe" accept-disclaimer
+          "$exe" check-disclaimer
       - uses: actions/upload-artifact@v4
         with:
           name: logi-native-win32-candidate
           path: |
             build-win32/logi-native.exe
-            build-win32/logi-cli.exe
             build-win32/mappings.ini
             build-win32/bridge.py

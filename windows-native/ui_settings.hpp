@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include <atomic>
 
 #include <filesystem>
 #include <fstream>
@@ -10,6 +11,29 @@
 #include <vector>
 
 namespace ui_settings {
+
+enum class LogLevel : unsigned { off, error, info, debug };
+inline constexpr const wchar_t* level_names[]{L"off",L"error",L"info",L"debug"};
+inline std::atomic<LogLevel> cached_level{LogLevel::info};
+inline std::atomic<ULONGLONG> level_due{};
+inline LogLevel log_level_now() {
+    const auto now=GetTickCount64();
+    auto next=level_due.load(std::memory_order_relaxed);
+    if(now>=next && level_due.compare_exchange_strong(next,now+250)) {
+        DWORD raw{},size=sizeof(raw);
+        const auto result=RegGetValueW(HKEY_CURRENT_USER,L"Software\\LogiNative",L"LogLevel",
+            RRF_RT_REG_DWORD,nullptr,&raw,&size);
+        cached_level.store(result==ERROR_SUCCESS && raw<=3?static_cast<LogLevel>(raw):LogLevel::info);
+    }
+    return cached_level.load(std::memory_order_relaxed);
+}
+inline bool set_log_level(LogLevel level) {
+    const DWORD raw=static_cast<DWORD>(level);
+    if(RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\LogiNative",L"LogLevel",REG_DWORD,&raw,sizeof(raw))!=ERROR_SUCCESS)return false;
+    cached_level.store(level);
+    level_due.store(0);
+    return true;
+}
 
 enum class Theme { system, dark, light };
 enum class Language { zh_cn, en_us };
@@ -246,34 +270,6 @@ inline FlowPollFn& flow_poll_hook() {
 inline FlowStopFn& flow_stop_hook() {
     static FlowStopFn fn{};
     return fn;
-}
-
-inline bool is_windows_autostart_enabled() {
-    DWORD type = 0, size = 0;
-    return RegGetValueW(HKEY_CURRENT_USER,
-                        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                        L"LogiNative", RRF_RT_REG_SZ, &type, nullptr, &size) == ERROR_SUCCESS;
-}
-
-inline bool set_windows_autostart(bool enable, const std::filesystem::path& exe_dir) {
-    HKEY key = nullptr;
-    const LONG open_rc = RegCreateKeyExW(
-        HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        0, nullptr, 0, KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, &key, nullptr);
-    if (open_rc != ERROR_SUCCESS || !key) return false;
-    LONG rc = ERROR_SUCCESS;
-    if (enable) {
-        const auto gui = (exe_dir / L"logi-native.exe").wstring();
-        const std::wstring cmd = L"\"" + gui + L"\" --tray";
-        rc = RegSetValueExW(key, L"LogiNative", 0, REG_SZ,
-                            reinterpret_cast<const BYTE*>(cmd.c_str()),
-                            static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
-    } else {
-        rc = RegDeleteValueW(key, L"LogiNative");
-        if (rc == ERROR_FILE_NOT_FOUND) rc = ERROR_SUCCESS;
-    }
-    RegCloseKey(key);
-    return rc == ERROR_SUCCESS;
 }
 
 } // namespace ui_settings

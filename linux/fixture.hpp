@@ -9,7 +9,12 @@ inline void append(const std::filesystem::path& path,const std::string& line){st
 class Device final:public DeviceBackend{
     std::filesystem::path base;bool connected{};unsigned dpi{1600};std::streamoff cursor{};
 public:
-    explicit Device(std::filesystem::path path):base(std::move(path)){}
+    explicit Device(std::filesystem::path path,bool fresh_reports=false):base(std::move(path)){
+        if(fresh_reports){
+            std::ifstream stream(base.string()+".events",std::ios::binary|std::ios::ate);
+            if(stream)cursor=static_cast<std::streamoff>(stream.tellg());
+        }
+    }
     void log(const std::string& text){append(base.string()+".trace",text);}
     bool connect(std::atomic_bool&)override{
         if(std::filesystem::exists(base.string()+".offline"))return false;

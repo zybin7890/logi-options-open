@@ -16,7 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parent
 WINDOWS = os.name == "nt"
 EXE = Path(os.environ.get("LOGI_OPTIONS_OPEN_CLI") or
-           (str(ROOT / "logi-cli.exe") if WINDOWS else
+           ((str(ROOT / "logi-cli.exe") if (ROOT / "logi-cli.exe").exists() else str(ROOT / "logi-native.exe"))
+            if WINDOWS else
             str(ROOT / "logi-cli") if (ROOT / "logi-cli").exists() else shutil.which("logi-cli") or "logi-cli"))
 DATA = ROOT if WINDOWS else Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "logi-options-open"
 CONFIG = Path(os.environ.get("LOGI_OPTIONS_OPEN_CONFIG", str(DATA / "mappings.ini")))

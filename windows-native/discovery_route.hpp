@@ -53,4 +53,59 @@ inline std::vector<unsigned> slots(const Interface& interface, const std::option
     return result;
 }
 
+struct Attempt {
+    std::size_t interface_index{};
+    unsigned slot{};
+    DWORD ping_ms{1250};
+};
+
+inline std::vector<Attempt> targets(const std::vector<Interface>& interfaces,
+                                    const std::optional<Hint>& hint,bool list) {
+    std::vector<Attempt> result;
+    for(std::size_t i=0;i<interfaces.size();++i)
+        for(auto slot:slots(interfaces[i],hint,list))result.push_back({i,slot});
+    return result;
+}
+
+// Owner discovery is incremental. A failed cached slot must not block its
+// next probe behind five empty slots and a full discovery backoff.
+struct OwnerSearch {
+    bool first{true};
+    bool require_live_features{};
+    std::size_t quick_cursor{},slow_cursor{};
+    ULONGLONG next_alternate{},next_slow{};
+    std::vector<Attempt> round(std::vector<Attempt> all,bool preferred,ULONGLONG now) {
+        if(all.empty())return {};
+        constexpr DWORD short_ping=180;
+        if(first) {
+            first=false;
+            if(!preferred) {
+                for(auto& target:all)target.ping_ms=short_ping;
+                return all;
+            }
+            // An already paired, slow device keeps the original cold-start timeout.
+            next_slow=now+4000;
+            return {all.front()};
+        }
+        std::vector<Attempt> work;
+        if(preferred)work.push_back({all.front().interface_index,all.front().slot,short_ping});
+        if(now>=next_slow) {
+            // Give every route the full ping budget eventually, including the
+            // preferred route. Only one slow probe can occupy an owner round.
+            auto target=all[slow_cursor++%all.size()];
+            next_slow=now+(preferred?4000:900);
+            if(preferred && target.interface_index==work.front().interface_index &&
+               target.slot==work.front().slot)work.clear();
+            work.push_back(target);
+        } else if(now>=next_alternate && all.size()>static_cast<unsigned>(preferred)) {
+            const auto first_alternate=static_cast<unsigned>(preferred);
+            auto target=all[first_alternate+quick_cursor++%(all.size()-first_alternate)];
+            target.ping_ms=short_ping;
+            work.push_back(target);
+        }
+        if(!work.empty() && (!preferred || work.size()>1))next_alternate=now+700;
+        return work;
+    }
+};
+
 } // namespace logi::discovery

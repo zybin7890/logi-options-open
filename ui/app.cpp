@@ -1173,6 +1173,20 @@ int interactionTests() {
             << "geometry=" << window.geometry() << "screen=" << (screen ? screen->geometry() : QRect{})
             << "active=" << QApplication::activeWindow() << "modal=" << QApplication::activeModalWidget()
             << "popup=" << QApplication::activePopupWidget();
+        if (QGuiApplication::platformName() == QStringLiteral("xcb")) {
+            const auto xid = QStringLiteral("0x") + QString::number(window.winId(), 16);
+            auto inspect = [](const QString& tool, const QStringList& args) {
+                QProcess query;
+                query.setProcessChannelMode(QProcess::MergedChannels);
+                query.start(tool, args);
+                if (query.waitForFinished(2000))
+                    qCritical().noquote() << tool << args << query.readAll();
+            };
+            inspect(QStringLiteral("xwininfo"), {"-id", xid, "-stats", "-tree"});
+            inspect(QStringLiteral("xprop"), {"-id", xid, "WM_STATE", "_NET_WM_STATE", "_NET_WM_DESKTOP"});
+            inspect(QStringLiteral("xprop"), {"-root", "_NET_ACTIVE_WINDOW", "_NET_CLIENT_LIST",
+                                              "_NET_SUPPORTING_WM_CHECK", "_NET_CURRENT_DESKTOP"});
+        }
         const auto evidence = qEnvironmentVariable("LOGI_TEST_EVIDENCE");
         if (!evidence.isEmpty() && screen && QDir().mkpath(evidence)) {
             const auto root = screen->grabWindow(0);

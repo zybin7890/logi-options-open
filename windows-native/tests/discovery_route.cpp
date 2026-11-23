@@ -45,5 +45,35 @@ int main() {
     prioritize(interfaces, absent, false);
     require(interfaces[0].path == first.path && interfaces[1].path == wanted.path);
     require(slots(wanted, absent, false) == std::vector<unsigned>{1, 2, 3, 4, 5, 6});
+    // Cold start, no hint, receiver is present but slots 1..3 never reply.
+    // Model the identical device latency for the CLI scan and the owner scan.
+    const std::vector<logi::Interface> one{wanted};
+    auto cold_slots=targets(one,{},false);
+    const auto latency=[](const std::vector<Attempt>& order)->DWORD {
+        DWORD elapsed{};
+        for(const auto attempt:order) {
+            if(attempt.slot==4)return elapsed+16;
+            elapsed+=attempt.ping_ms;
+        }
+        return INFINITE;
+    };
+    OwnerSearch cold;
+    const auto cold_ms=latency(cold.round(cold_slots,false,0));
+    require(cold_ms==556 && latency(cold_slots)==3766);
+    // Stale hint (4), replacement in slot 2 needs 450 ms, so short probes
+    // never work. Long-timeout coverage must still reach the replacement.
+    OwnerSearch warm;
+    const auto preferred=targets(one,hint,false);
+    bool slow_found{};
+    for(ULONGLONG now=0;now<=20000;now+=250) {
+        auto batch=warm.round(preferred,true,now);
+        require(!batch.empty() && batch.front().slot==4 && batch.size()<=2);
+        if(std::ranges::any_of(batch,[](const Attempt& a){return a.slot==2 && a.ping_ms>=450;})) {
+            slow_found=true;break;
+        }
+    }
+    require(slow_found);
+    std::cout << "Cold receiver slot 4 discovery model: legacy=" << latency(cold_slots)
+              << "ms owner=" << cold_ms << "ms\n";
     std::cout << "Production discovery route parsing, ordering, stale fallback and list mode passed\n";
 }

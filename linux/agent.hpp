@@ -22,6 +22,7 @@ struct DeviceBackend {
     virtual void disconnect() noexcept=0;
     virtual void configure(const Config&)=0;
     virtual void restore()=0;
+    virtual bool needs_crash_restore() const{return false;}
     virtual DeviceEvent read(unsigned timeout_ms)=0;
     virtual std::string command(const std::string&)=0;
     virtual WheelInfo wheel() const=0;
@@ -53,5 +54,9 @@ std::string dispatch(const std::string& command);
 std::vector<Action> load_actions(const std::filesystem::path& file);
 int preview_ring(const std::filesystem::path& file,const std::string& folder={});
 int run(const std::filesystem::path& config);
+// Fork before constructing HID, desktop or input resources. The parent owns
+// only the control endpoint; each worker constructs its own backend.
+int supervise(const std::filesystem::path& config,int (*worker)(const std::filesystem::path&));
+int run_device(const std::filesystem::path& config,DeviceBackend& device);
 int run_with(const std::filesystem::path& config,DeviceBackend&,InputSink&,RuntimeHooks&);
 }

@@ -6,7 +6,9 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/logi-cli run
-Restart=no
+Restart=on-abnormal
+RestartSec=2s
+KillMode=mixed
 TimeoutStopSec=15
 
 [Install]
