@@ -23,9 +23,10 @@ struct Platform {
     bool worker() const {return s->caller!=GetCurrentThreadId();}
     bool stopped() const {return s->stopped || (worker()&&s->cancel_worker);}
     ULONGLONG now() const {return s->clock;}
-    std::optional<Foreground> verify(Target target) const {
+    std::optional<Foreground> verify(Target target,Skip& reason) const {
         ++s->verifications;
-        if(!s->allowed || !target.window || target.pid!=1)return {};
+        if(!s->allowed || !target.window)return {};
+        if(target.pid!=1){reason=Skip::foreground_changed;return {};}
         return Foreground{(worker()&&s->different_focus)?HWND_DESKTOP:target.window,1};
     }
     Result write(UINT count,INPUT* input,int) const {
@@ -63,7 +64,8 @@ bool next_action() {
 bool ineligible() {
     Fixture f;
     f.s.allowed=false;f.deny_next();
-    CHECK(f.action(1,10).sent==0 && f.s.transitions.empty());
+    const auto rejected=f.action(1,10);
+    CHECK(rejected.sent==0 && rejected.error==ERROR_ACCESS_DENIED && rejected.skip==Skip::none && f.s.transitions.empty());
     f.s.allowed=true;f.s.direct.push_back({2,ERROR_ACCESS_DENIED});
     CHECK(f.action(2,20,4).sent==2 && f.s.transitions.empty());
     f.s.direct.push_back({0,ERROR_INVALID_HANDLE});
@@ -71,13 +73,15 @@ bool ineligible() {
     f.deny_next();CHECK(f.action(0,40).sent==0 && f.s.transitions.empty());
     f.deny_next();CHECK(f.action(5,50).sent==0);
     f.s.allowed=false;
-    CHECK(!f.action(6,60).attempted);
+    CHECK(f.action(6,60).skip==Skip::unverified);
+    f.s.allowed=true;
+    CHECK(f.action(6,61,1,2).skip==Skip::foreground_changed);
     f.s.allowed=true;f.s.different_focus=true;
-    CHECK(!f.action(7,70).attempted && f.router.generation()==0);
+    CHECK(f.action(7,70).skip==Skip::foreground_changed && f.router.generation()==0);
     f.s.different_focus=false;f.s.cancel_worker=true;
-    CHECK(!f.action(8,80).attempted && f.router.generation()==0);
+    CHECK(f.action(8,80).skip==Skip::stopping && f.router.generation()==0);
     f.s.cancel_worker=false;f.s.stopped=true;
-    CHECK(!f.action(9,90).attempted && f.s.writes.size()==5);
+    CHECK(f.action(9,90).skip==Skip::stopping && f.s.writes.size()==5);
     return true;
 }
 bool partial_worker() {

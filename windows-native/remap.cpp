@@ -148,15 +148,21 @@ struct WinInput {
             sender.LowPart==receiver.LowPart && sender.HighPart==receiver.HighPart;
         CloseHandle(process);return ordinary;
     }
-    static std::optional<input_sender::Foreground> verify(input_sender::Target target) {
-        if(!target.window || !target.pid || target.window!=GetForegroundWindow())return {};
+    static std::optional<input_sender::Foreground> verify(input_sender::Target target,input_sender::Skip& reason) {
+        auto changed=[&]() -> std::optional<input_sender::Foreground> {
+            reason=input_sender::Skip::foreground_changed;
+            return {};
+        };
+        if(!target.window || !target.pid)return {};
+        if(target.window!=GetForegroundWindow())return changed();
         HANDLE impersonation{};
         if(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&impersonation)){CloseHandle(impersonation);return {};}
         if(GetLastError()!=ERROR_NO_TOKEN || !named(GetProcessWindowStation(),L"WinSta0"))return {};
         DWORD pid{},ours{},theirs{};
         const auto thread=GetWindowThreadProcessId(target.window,&pid);
-        if(!thread || pid!=target.pid ||
-           !ProcessIdToSessionId(GetCurrentProcessId(),&ours) || !ours ||
+        if(!thread)return {};
+        if(pid!=target.pid)return changed();
+        if(!ProcessIdToSessionId(GetCurrentProcessId(),&ours) || !ours ||
            !ProcessIdToSessionId(pid,&theirs) || ours!=theirs ||
            !input_desktop(GetCurrentThreadId()) || !input_desktop(thread))return {};
         LUID sender{};
@@ -170,7 +176,7 @@ struct WinInput {
                 !ProcessIdToSessionId(focus_pid,&theirs) || ours!=theirs ||
                 !input_desktop(focus_thread) || !same_logon(focus_pid,sender)))return {};
         }
-        if(target.window!=GetForegroundWindow() || GetWindowThreadProcessId(target.window,&pid)!=thread || pid!=target.pid)return {};
+        if(target.window!=GetForegroundWindow() || GetWindowThreadProcessId(target.window,&pid)!=thread || pid!=target.pid)return changed();
         return input_sender::Foreground{gui.hwndFocus,thread,focus_thread,focus_pid};
     }
     bool stopped() const {return WaitForSingleObject(stop,0)!=WAIT_TIMEOUT;}
@@ -203,11 +209,11 @@ InputKind input_kind(const INPUT& input) {
     if(input.mi.dwFlags&MOUSEEVENTF_HWHEEL)return InputKind::horizontal;
     return InputKind::mouse;
 }
-struct RejectionEpisode { ULONGLONG next{}; DWORD error{},pid{}; };
+struct RejectionEpisode { ULONGLONG next{}; DWORD error{},pid{}; input_sender::Skip skip{}; };
 thread_local std::array<RejectionEpisode,4> input_episodes{};
 thread_local unsigned active_input_episodes{};
 
-void report_input_rejection(InputKind kind,UINT requested,UINT accepted,DWORD error) {
+void report_input_rejection(InputKind kind,UINT requested,UINT accepted,DWORD error,input_sender::Skip skip) {
     if(!log_enabled(LogLevel::error))return;
     DWORD foreground_pid{};
     GetWindowThreadProcessId(GetForegroundWindow(),&foreground_pid);
@@ -215,18 +221,24 @@ void report_input_rejection(InputKind kind,UINT requested,UINT accepted,DWORD er
     const auto index=static_cast<unsigned>(kind);
     auto& recent=input_episodes[index];
     if(!recent.next)++active_input_episodes;
-    if (now<recent.next && recent.error==error && recent.pid==foreground_pid) return;
-    recent={now+5000,error,foreground_pid};
+    if (now<recent.next && recent.error==error && recent.pid==foreground_pid && recent.skip==skip) return;
+    recent={now+5000,error,foreground_pid,skip};
 
     SYSTEMTIME time{}; GetLocalTime(&time);
-    if(!log_enabled(LogLevel::debug)) {
-        agent_message(LogLevel::error,stderr,"[%04u-%02u-%02u %02u:%02u:%02u.%03u] SendInput rejected: kind=%s accepted=%u/%u error=%lu\n",
-            time.wYear,time.wMonth,time.wDay,time.wHour,time.wMinute,time.wSecond,time.wMilliseconds,input_names[index],accepted,requested,error);
-        return;
-    }
     const auto foreground=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,foreground_pid);
     const auto fg_level=integrity_level(foreground);
     if (foreground) CloseHandle(foreground);
+    const auto sender_level=integrity_level(GetCurrentProcess());
+    const char* stage=skip==input_sender::Skip::none ? "SendInput rejected" : "Input not sent";
+    const char* reason=skip==input_sender::Skip::none ? "system-rejected" :
+        skip==input_sender::Skip::foreground_changed ? "foreground-changed" : "target-unverified";
+    const char* integrity=fg_level<0 || sender_level<0 ? "unreadable" :
+        fg_level>sender_level ? "foreground-higher" : "foreground-equal-or-lower";
+    if(!log_enabled(LogLevel::debug)) {
+        agent_message(LogLevel::error,stderr,"[%04u-%02u-%02u %02u:%02u:%02u.%03u] %s: kind=%s accepted=%u/%u error=%lu reason=%s integrity=%s\n",
+            time.wYear,time.wMonth,time.wDay,time.wHour,time.wMinute,time.wSecond,time.wMilliseconds,stage,input_names[index],accepted,requested,error,reason,integrity);
+        return;
+    }
 
     wchar_t sender_name[256]{},input_name[256]{};
     DWORD length{};
@@ -238,10 +250,10 @@ void report_input_rejection(InputKind kind,UINT requested,UINT accepted,DWORD er
         ? ERROR_SUCCESS : GetLastError();
     if (input) CloseDesktop(input);
     const auto same=sender_error || input_error ? "unknown" : (_wcsicmp(sender_name,input_name)==0 ? "yes" : "no");
-    agent_message(LogLevel::debug,stderr,"[%04u-%02u-%02u %02u:%02u:%02u.%03u] SendInput rejected: kind=%s accepted=%u/%u error=%lu "
-        "sender_pid=%lu sender_IL=%ld fg_pid=%lu fg_IL=%ld same_desktop=%s sender_desktop_error=%lu input_desktop_error=%lu\n",
-        time.wYear,time.wMonth,time.wDay,time.wHour,time.wMinute,time.wSecond,time.wMilliseconds,input_names[index],accepted,requested,error,
-        GetCurrentProcessId(),integrity_level(GetCurrentProcess()),foreground_pid,fg_level,same,sender_error,input_error);
+    agent_message(LogLevel::debug,stderr,"[%04u-%02u-%02u %02u:%02u:%02u.%03u] %s: kind=%s accepted=%u/%u error=%lu "
+        "sender_pid=%lu sender_IL=%ld fg_pid=%lu fg_IL=%ld same_desktop=%s sender_desktop_error=%lu input_desktop_error=%lu reason=%s integrity=%s\n",
+        time.wYear,time.wMonth,time.wDay,time.wHour,time.wMinute,time.wSecond,time.wMilliseconds,stage,input_names[index],accepted,requested,error,
+        GetCurrentProcessId(),sender_level,foreground_pid,fg_level,same,sender_error,input_error,reason,integrity);
     std::fflush(stderr);
 }
 void report_input_recovery(InputKind kind) {
@@ -267,7 +279,7 @@ UINT send_input(UINT count,INPUT* events,int size) {
     const DWORD previous=GetLastError();
 #ifndef SendInput
     const auto outcome=input_router?input_router->submit(routed_action,count,events,size):WinInput::write(count,events,size);
-    if(!outcome.attempted){SetLastError(outcome.error);return 0;}
+    if(outcome.skip==input_sender::Skip::stopping){SetLastError(outcome.error);return 0;}
     const auto sent=outcome.sent;const DWORD error=outcome.error;
 #else
     SetLastError(ERROR_SUCCESS);
@@ -277,7 +289,7 @@ UINT send_input(UINT count,INPUT* events,int size) {
     if(sent!=count) {
         if(health)InterlockedIncrement(&health->input_failures);
 #ifndef SendInput
-        if(sent<count)report_input_rejection(input_kind(events[sent]),count,sent,error);
+        if(sent<count)report_input_rejection(input_kind(events[sent]),count,sent,error,outcome.skip);
 #endif
     }
 #ifndef SendInput
@@ -1124,6 +1136,59 @@ struct ScrollOutput {
             if(axis.filter.active())delay=std::min<DWORD>(delay,static_cast<DWORD>(axis.filter.due()-now));
         }
         return delay;
+    }
+};
+
+// Keep the standard HID wheel on for applications outside the smooth-scroll
+// scope. Its real wheel events follow Windows' own routing and trust boundary.
+#ifndef SendInput
+bool wheel_output_allowed(DWORD pid) {
+    static const long sender=integrity_level(GetCurrentProcess());
+    const auto process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+    if(!process)return false;
+    const auto receiver=integrity_level(process);
+    CloseHandle(process);
+    return receiver>=0 && receiver<=sender;
+}
+#elif !defined(wheel_output_allowed)
+bool wheel_output_allowed(DWORD) {return true;}
+#endif
+
+struct MainWheelRouting {
+    static constexpr DWORD check_interval=100;
+    HWND window{};
+    DWORD pid{},hovered_child{};
+    bool browser{},allowed{},over_owner{},child_allowed{};
+    ULONGLONG next_hover{};
+
+    bool smooth(Foreground& foreground,const Mappings& mappings,DWORD rejected_pid) {
+        const auto& path=foreground.get();
+        if(window!=foreground.window || pid!=foreground.pid) {
+            window=foreground.window;pid=foreground.pid;
+            browser=ScrollOutput::browser(path);
+            allowed=pid && !path.empty() && wheel_output_allowed(pid);
+            hovered_child=0;child_allowed=false;next_hover=0;
+        }
+        if(!allowed || pid==rejected_pid || (!browser && !mappings.scroll_smooth_all.value_or(false)))return false;
+        const auto now=GetTickCount64();
+        if(now>=next_hover) {
+            POINT point{};DWORD hovered_pid{};
+            const auto hovered=GetCursorPos(&point)?WindowFromPoint(point):nullptr;
+            if(hovered)GetWindowThreadProcessId(hovered,&hovered_pid);
+            over_owner=pid==hovered_pid;
+            if(hovered_pid && !over_owner) {
+                DWORD root_pid{};
+                if(const auto root=GetAncestor(hovered,GA_ROOT))GetWindowThreadProcessId(root,&root_pid);
+                if(root_pid==pid) {
+                    if(hovered_child!=hovered_pid) {
+                        hovered_child=hovered_pid;child_allowed=wheel_output_allowed(hovered_pid);
+                    }
+                    over_owner=child_allowed;
+                }
+            }
+            next_hover=now+check_interval;
+        }
+        return over_owner;
     }
 };
 
@@ -2563,7 +2628,7 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
     auto& main=owned_main?*owned_main:no_main;
     DWORD session_main_pid{};
     auto& blocked_main_pid=remembered_main_pid?*remembered_main_pid:session_main_pid;
-    bool main_native=blocked_main_pid!=0,main_switch_pending{};
+    bool main_native=main && !(main->mode&1),main_switch_pending{};
     auto last_sender_generation=generation();
     ULONGLONG main_retry_at{};
     const auto& bindings = mappings.bindings;
@@ -2591,6 +2656,7 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         ~SessionCleanup(){for(auto& control:controls)cancel_gesture(control);sequences.cancel();}
     } cleanup{controls,sequences};
     Foreground foreground;
+    MainWheelRouting wheel_routing;
     std::vector<std::size_t> pending;
     bool await_neutral{};
     unsigned traced_buttons{};
@@ -2675,19 +2741,14 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         const auto current_generation=generation();
         if(main && !main_switch_pending && !sequences.scrolling.rejected_main_pid && current_generation!=last_sender_generation) {
             last_sender_generation=current_generation;
-            if(blocked_main_pid && main_native) {
-                main_native=false;main_switch_pending=true;main_retry_at=0;
-                sequences.scrolling.cancel(1);
-            }
             blocked_main_pid=0;
         }
         if(main && sequences.scrolling.rejected_main_pid) {
             last_sender_generation=current_generation;
             blocked_main_pid=std::exchange(sequences.scrolling.rejected_main_pid,0ul);
-            main_native=true;main_switch_pending=true;main_retry_at=0;
-        } else if(main && blocked_main_pid && !main_switch_pending) {
-            foreground.get();
-            const bool native=!foreground.pid || foreground.pid==blocked_main_pid;
+        }
+        if(main && !periodic.main_switch) {
+            const bool native=!wheel_routing.smooth(foreground,mappings,blocked_main_pid);
             if(native!=main_native) {
                 main_native=native;main_switch_pending=true;main_retry_at=0;
                 sequences.scrolling.cancel(1);
@@ -2861,8 +2922,8 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
                 const auto* route=main_native?"native reporting":"smooth reporting";
                 if(log_enabled(LogLevel::debug))
                     agent_message(LogLevel::debug,stderr,"Main wheel %s verified; rejected foreground PID %lu.\n",route,blocked_main_pid);
-                else agent_message(LogLevel::info,stderr,"Main wheel %s verified.\n",route);
-                std::fflush(stderr);
+                else if(blocked_main_pid)agent_message(LogLevel::info,stderr,"Main wheel %s verified.\n",route);
+                continue;
             }
         }
         if (sync_ready && reload_waiting) {
@@ -2891,8 +2952,10 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
                 agent_message(LogLevel::error,stderr,"Reload rejected; previous shortcuts restored.\n");std::fflush(stderr);
                 continue;
             }
+            const bool wheel_scope_changed=main && mappings.scroll_smooth_all.value_or(false)!=next.scroll_smooth_all.value_or(false) &&
+                (main_switch_pending || wheel_routing.smooth(foreground,next,blocked_main_pid)==main_native);
             const bool hardware_changed=control_layout(mouse,mappings.bindings)!=control_layout(mouse,next.bindings)||
-                mappings.scroll_smooth.value_or(false)!=next.scroll_smooth.value_or(false);
+                mappings.scroll_smooth.value_or(false)!=next.scroll_smooth.value_or(false)||wheel_scope_changed;
             std::vector<unsigned> held_controls;
             // A replacement cancels an old gesture; it must never synthesize its END action.
             for(auto& control:controls) {
@@ -2929,6 +2992,7 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
                 if(!verified){fail_hardware(WaitForSingleObject(stop_event,0)==WAIT_OBJECT_0?ReloadStatus::stopped:ReloadStatus::hardware_failed);return EventExit::restart;}
                 controls.clear();wheel.reset();main.reset();
                 const bool wants=std::ranges::any_of(next.bindings,[](const auto& binding){return binding.control==thumb_wheel;});
+                main_native=next.scroll_smooth.value_or(false) && !wheel_routing.smooth(foreground,next,blocked_main_pid);
                 if (!enable(mouse,next.bindings,controls) || (wants && !divert_wheel(mouse,wheel,next.thumb_speed.value_or(100)))||
                     (next.scroll_smooth.value_or(false)&&!divert_main(mouse,main,!main_native))) {
                     fail_hardware(WaitForSingleObject(stop_event,0)==WAIT_OBJECT_0?ReloadStatus::stopped:ReloadStatus::hardware_failed);
@@ -2961,7 +3025,7 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         if (!hotkeys.empty()) dispatch_hotkeys(hotkeys, pending, sequences, mouse);
         auto timeout = sequences.service(mouse);
         if(sequences.scrolling.rejected_main_pid)timeout=0;
-        if(main && blocked_main_pid)timeout=std::min<DWORD>(timeout,250);
+        if(main)timeout=std::min(timeout,MainWheelRouting::check_interval);
         // A foreground/UIPI rejection affects that output only. Releasing the HID
         // session here would also drop unrelated buttons and restart discovery.
         // A retired software-ID window can make begin_control busy without any I/O
@@ -3081,7 +3145,8 @@ EventExit events(logi::Mouse& mouse, std::vector<Control>& controls, std::option
         }
         if(main&&packet.bytes[2]==mouse.wheel&&event==0) {
             trace_mapping(main_wheel_trace,TraceStage::wheel_report);
-            if(main_native||main_switch_pending||repair_quarantine||reload_window||(settings_unverified_mask&12))continue;
+            if(main_native||main_switch_pending||repair_quarantine||reload_window||(settings_unverified_mask&12)||
+               !wheel_routing.smooth(foreground,mappings,blocked_main_pid))continue;
             const auto movement=smooth_scroll::decode(data,main->multiplier,(main->mode&4)!=0);
             if(movement&&movement->units&&!sequences.scrolling.feed(1,movement->units,foreground.capture(),mappings.scroll_smooth_all.value_or(false))) {
                 sequences.failed=true;
@@ -3562,6 +3627,8 @@ int run_agent(const wchar_t* path, bool take_over) {
             std::vector<Control> controls;
             std::optional<Wheel> wheel;
             std::optional<MainWheel> main;
+            Foreground foreground;
+            MainWheelRouting wheel_routing;
             if(setting_commands)setting_commands->observe_wheel({});
             // Reuse only reporting read back during this takeover on this channel.
             logi::StandardReporting standard;
@@ -3575,7 +3642,9 @@ int run_agent(const wchar_t* path, bool take_over) {
             if ((needs_device() && !activate("standard-reporting",[&]{return logi::restore_standard_input(*mouse,&standard,&previous_controls);})) ||
                 !activate("buttons",[&]{return enable(*mouse,bindings,controls,standard.controls);}) ||
                 (wants_wheel && !activate("thumb-wheel",[&]{return divert_wheel(*mouse,wheel,mappings.thumb_speed.value_or(100),standard.thumb);})) ||
-                (mappings.scroll_smooth.value_or(false) && !activate("main-wheel",[&]{return divert_main(*mouse,main,!blocked_main_pid,standard.wheel); }))) {
+                (mappings.scroll_smooth.value_or(false) && !activate("main-wheel",[&]{
+                    return divert_main(*mouse,main,wheel_routing.smooth(foreground,mappings,blocked_main_pid),standard.wheel);
+                }))) {
                 const auto failed_at=GetTickCount64();
                 search.require_live_features=true;
                 const bool cleaned=restore(*mouse, controls, wheel,true,main);

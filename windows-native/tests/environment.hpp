@@ -16,6 +16,8 @@
 #define CHECK(x) do {if(!(x))throw std::runtime_error(#x);}while(0)
 static bool stopped,restore_ok;
 static std::atomic<unsigned> foreground_app{1};
+static unsigned hovered_app{},hovered_root{},blocked_wheel_app{};
+static std::wstring second_app_name;
 static std::function<void(unsigned)> before_step;
 static std::function<void()> observe_lastinput;
 static std::function<unsigned(UINT,LPINPUT)> input_result;
@@ -90,10 +92,14 @@ BOOL WINAPI fake_lastinput(PLASTINPUTINFO input){if(observe_lastinput)observe_la
 BOOL WINAPI fake_peek(LPMSG,HWND,UINT,UINT,UINT){return FALSE;}
 UINT WINAPI fake_input(UINT n,LPINPUT input,int){const auto accepted=input_result?input_result(n,input):n;CHECK(accepted<=n);captured.insert(captured.end(),input,input+accepted);for(unsigned i=0;i<accepted;++i)capture_times.push_back(tick);return accepted;}
 HWND WINAPI fake_foreground(){return reinterpret_cast<HWND>(static_cast<uintptr_t>(foreground_app));}
+BOOL WINAPI fake_cursor_pos(LPPOINT point){*point={};return TRUE;}
+HWND WINAPI fake_window_from_point(POINT){return hovered_app?reinterpret_cast<HWND>(static_cast<uintptr_t>(hovered_app)):fake_foreground();}
+HWND WINAPI fake_root_window(HWND window,UINT kind){CHECK(kind==GA_ROOT);return hovered_root?reinterpret_cast<HWND>(static_cast<uintptr_t>(hovered_root)):window;}
+static bool fake_wheel_output_allowed(DWORD pid){return blocked_wheel_app!=pid;}
 static std::atomic<DWORD> foreground_pid_override{};
 DWORD WINAPI fake_window_pid(HWND window,LPDWORD pid){const auto override_pid=foreground_pid_override.load();*pid=override_pid?override_pid:static_cast<DWORD>(reinterpret_cast<uintptr_t>(window));return *pid;}
 HANDLE WINAPI fake_open_process(DWORD,BOOL,DWORD pid){return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(1000+pid));}
-BOOL WINAPI fake_process_path(HANDLE handle,DWORD,LPWSTR path,PDWORD size){const auto pid=reinterpret_cast<uintptr_t>(handle)-1000;const wchar_t* name=pid==1?(fixture_app_name.empty()?L"C:\\Apps\\a.exe":fixture_app_name.c_str()):L"C:\\Apps\\b.exe";const auto n=std::wcslen(name);CHECK(*size>n);std::wcscpy(path,name);*size=static_cast<DWORD>(n);return TRUE;}
+BOOL WINAPI fake_process_path(HANDLE handle,DWORD,LPWSTR path,PDWORD size){const auto pid=reinterpret_cast<uintptr_t>(handle)-1000;const wchar_t* name=pid==1?(fixture_app_name.empty()?L"C:\\Apps\\a.exe":fixture_app_name.c_str()):(second_app_name.empty()?L"C:\\Apps\\b.exe":second_app_name.c_str());const auto n=std::wcslen(name);CHECK(*size>n);std::wcscpy(path,name);*size=static_cast<DWORD>(n);return TRUE;}
 SHORT WINAPI fake_key(int key){return key>=0&&key<256&&physical_keys[key]?SHORT(0x8000):0;}
 static bool allow_open,fail_open;
 HINSTANCE WINAPI fake_shell(HWND,LPCWSTR,LPCWSTR,LPCWSTR,LPCWSTR,INT){CHECK(allow_open);if(fail_open)return reinterpret_cast<HINSTANCE>(31);foreground_app=2;return reinterpret_cast<HINSTANCE>(33);}
@@ -128,6 +134,10 @@ BOOL WINAPI fake_keyboard_unhook(HHOOK){return TRUE;}
 #define PeekMessageW fake_peek
 #define SendInput fake_input
 #define GetForegroundWindow fake_foreground
+#define GetCursorPos fake_cursor_pos
+#define WindowFromPoint fake_window_from_point
+#define GetAncestor fake_root_window
+#define wheel_output_allowed fake_wheel_output_allowed
 #define GetWindowThreadProcessId fake_window_pid
 #define OpenProcess fake_open_process
 #define QueryFullProcessImageNameW fake_process_path

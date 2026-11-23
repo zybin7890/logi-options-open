@@ -25,10 +25,11 @@ int main(int argc,char** argv){try{
     const bool thumb=scenario=="thumb"||thumb_volume||scenario=="thumb-default";
     const bool same_pid_recovery=scenario=="input-generation"||scenario=="input-generation-pending";
     const bool native_only=scenario=="input-rejected"||scenario=="input-cancelled-current-owner";
+    const bool clash_scope=scenario=="clash-browser"||scenario=="clash-protected-all";
     const bool disabled=scenario=="default"||scenario=="reload-enable"||thumb;
     const auto config=[&](bool enabled) {
         return std::string(scenario=="main-only"||scenario=="main-only-loss"?"[global]\nscroll.smooth=":"[global]\n0052=A\nscroll.smooth=")+(enabled?"1\n":"0\n")+
-            (scenario=="input-recovery"?"scroll.smooth.all=1\n":"")+
+            (scenario=="input-recovery"||scenario=="clash-protected-all"?"scroll.smooth.all=1\n":"")+
             (thumb?thumb_volume?"thumb.smooth=1\nthumb.left=VolumeDown\nthumb.right=VolumeUp\n":
              scenario=="thumb-default"?"thumb.left=ScrollLeft\nthumb.right=ScrollRight\n":
              "thumb.smooth=1\nthumb.left=ScrollLeft\nthumb.right=ScrollRight\n":"");
@@ -208,6 +209,40 @@ int main(int argc,char** argv){try{
             end.at=30000;steps.push_back(end);
         }
         else if(scenario=="nonbrowser")fixture_app_name=L"C:\\Apps\\notepad.exe";
+        else if(scenario=="reload-scope") {
+            fixture_app_name=L"C:\\Apps\\notepad.exe";
+            Step enable;enable.idle=true;enable.at=200;
+            Step disable=enable;disable.at=600;
+            Step enabled_wheel=movement;enabled_wheel.at=350;
+            Step native_wheel=movement;native_wheel.at=800;
+            steps={steps.front(),enable,enabled_wheel,disable,native_wheel,end};
+            before_step=[&](unsigned index) {
+                if(index==2||index==4){std::ofstream(fixture_path)<<config(true)<<"scroll.smooth.all="<<(index==2?1:0)<<"\n";reload_signal=true;}
+                if(index==1||index==5)CHECK(mode_value==2);
+                if(index==3)CHECK(mode_value==3);
+            };
+        }
+        else if(clash_scope) {
+            fixture_app_name=L"C:\\Apps\\Clash Party.exe";second_app_name=L"C:\\Apps\\firefox.exe";
+            if(scenario=="clash-protected-all")blocked_wheel_app=1;
+            Step to_browser;to_browser.idle=true;to_browser.app=2;to_browser.at=200;
+            Step hover_clash;hover_clash.idle=true;hover_clash.at=500;
+            Step in_clash=movement;in_clash.at=650;
+            Step hover_browser=hover_clash;hover_browser.at=700;
+            Step in_browser=movement;in_browser.at=900;
+            Step to_clash=to_browser;to_clash.app=1;to_clash.at=1200;
+            Step final_wheel=movement;final_wheel.at=1400;
+            movement.at=350;
+            steps={steps.front(),to_browser,movement,hover_clash,in_clash,hover_browser,in_browser,to_clash,final_wheel,end};
+            before_step=[&](unsigned index) {
+                if(index==4)hovered_app=1;
+                // A browser renderer child can have a different PID from its top-level window.
+                if(index==6){hovered_app=3;hovered_root=2;}
+                if(index==8){hovered_app=0;hovered_root=0;}
+                if(index==1 || index==5 || index==9)CHECK(mode_value==2);
+                if(index==3 || index==7)CHECK(mode_value==3);
+            };
+        }
         else if(scenario=="packet-resolution"){movement.wheel_flags=1;movement.wheel_delta=1;movement.at=110;steps.insert(steps.begin()+1,movement);}
         else if(scenario=="negative"){steps[0].wheel_delta=-8;}
         else if(scenario=="malformed"){steps[0].wheel_flags=0x91;}
@@ -254,12 +289,11 @@ int main(int argc,char** argv){try{
         else if(scenario=="input-recovery"||scenario=="input-recovery-direct") {
             // Rejection by a privileged foreground must not release the device.
             // A fresh side-button press and wheel movement must work on return.
-            if(scenario=="input-recovery-direct")fixture_app_name=L"C:\\Apps\\notepad.exe";
             input_result=[&](UINT count,LPINPUT){if(tick>=200)return count;++rejected_wheel;return 0u;};
             Step press;press.at=250;press.down=true;press.app=2;
             Step release;release.at=260;
             movement.at=300;steps={steps.front(),press,release,movement,end};
-            before_step=[&](unsigned index){if(index==2)CHECK(mode_value==2&&native_readbacks>0);if(index==4)CHECK(mode_value==3);};
+            before_step=[&](unsigned index){if(index==2)CHECK(mode_value==2&&native_readbacks>0);if(index==4)CHECK(mode_value==(scenario=="input-recovery-direct"?2u:3u));};
         }
         else if(scenario=="input-preempt"||scenario=="input-stop-pending"||scenario=="input-readback"||scenario=="input-reload") {
             input_result=[&](UINT count,LPINPUT input){
@@ -337,8 +371,12 @@ int main(int argc,char** argv){try{
             }
             CHECK(received==expected && connects==1 && observed_ready==1);
         }
-        else if(scenario=="default"||scenario=="malformed"||native_only||scenario=="input-preempt"||
+        else if(scenario=="default"||scenario=="nonbrowser"||scenario=="input-recovery-direct"||scenario=="malformed"||native_only||scenario=="input-preempt"||
            scenario=="input-stop-pending"||scenario=="input-readback")CHECK(scroll_count==0);
+        else if(clash_scope) {
+            CHECK(total==240 && scroll_count>4 && mode_writes==std::vector<unsigned>({3,2,3,2}));
+            for(const auto at:capture_times)CHECK((at>=350&&at<500)||(at>=900&&at<1200));
+        }
         else if(scenario=="thumb-volume"){CHECK(captured.empty()&&thumb_volume_steps==1&&fallback_huds==1);}
         else if(scenario=="thumb-volume-media"){
             CHECK(scroll_count==0&&thumb_volume_steps==0&&fallback_huds==0&&captured.size()==2);
@@ -349,8 +387,8 @@ int main(int argc,char** argv){try{
         else if(scenario=="disconnect"||scenario=="loss"||scenario=="loss-no-neutral"||scenario=="main-only-loss")CHECK(total==192&&scroll_count>2);
         else if(scenario=="invert"||scenario=="negative")CHECK(total==-120&&scroll_count>2);
         else if(scenario=="packet-resolution")CHECK(total==240&&scroll_count>2);
-        else {CHECK(total==120);if(scenario=="nonbrowser"||scenario=="thumb-default"||scenario=="input-recovery-direct")CHECK(scroll_count==1);else CHECK(scroll_count>2);}
-        if(scenario=="default"||thumb)CHECK(mode_writes.empty());
+        else {CHECK(total==120);if(scenario=="thumb-default")CHECK(scroll_count==1);else CHECK(scroll_count>2);}
+        if(scenario=="default"||scenario=="nonbrowser"||thumb)CHECK(mode_writes.empty());
         else {
             CHECK(!mode_writes.empty()&&!(mode_writes.back()&1));CHECK(mode_reads>=3);
             CHECK(mode_value==(scenario=="invert"?6u:2u));
@@ -360,7 +398,7 @@ int main(int argc,char** argv){try{
         }
         if(scenario=="disconnect")CHECK(connects==2&&std::ranges::count(mode_writes,2u)==1);
         if(native_only||scenario=="input-recovery"||scenario=="input-recovery-direct") {
-            CHECK(rejected_wheel==1&&connects==1&&std::ranges::count(mode_writes,2u)==(native_only?1:2)&&control_restores==1);
+            CHECK(rejected_wheel==1&&connects==1&&std::ranges::count(mode_writes,2u)==(native_only||scenario=="input-recovery-direct"?1:2)&&control_restores==1);
             CHECK(observed_ready==1&&observed_mappings==1);
             if(native_only)CHECK(mode_writes==std::vector<unsigned>({3,2}));
             else {

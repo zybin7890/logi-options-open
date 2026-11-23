@@ -9,7 +9,13 @@
 namespace input_sender {
 struct Target { HWND window{}; DWORD pid{}; };
 struct Action { std::uint64_t serial{}; Target target; };
-struct Result { UINT sent{}; DWORD error{}; bool attempted{true}; };
+enum class Skip { none, stopping, foreground_changed, unverified };
+struct Result {
+    UINT sent{};
+    DWORD error{};
+    Skip skip{};
+    static Result skipped(Skip reason){return {0,ERROR_CANCELLED,reason};}
+};
 struct Foreground { HWND focus{}; DWORD thread{},focus_thread{},focus_pid{}; bool operator==(const Foreground&) const=default; };
 enum class Change { armed, recovered, retired };
 
@@ -25,7 +31,7 @@ template<class Platform> class Router {
     bool stopping_{},armed_{},confirmed_{},inhibited_{};
     std::uint64_t failed_serial_{},next_create_{},partial_serial_{};
     unsigned generation_{};
-    static bool denied(Result r){return r.attempted && !r.sent && r.error==ERROR_ACCESS_DENIED;}
+    static bool denied(Result r){return r.skip==Skip::none && !r.sent && r.error==ERROR_ACCESS_DENIED;}
 
     void run() {
         std::unique_lock lock(mutex_);
@@ -34,11 +40,15 @@ template<class Platform> class Router {
             if(stopping_)return;
             auto& job=*pending_;
             lock.unlock();
-            const auto foreground=platform_.verify(job.target);
+            Skip reason=Skip::unverified;
+            const auto foreground=platform_.verify(job.target,reason);
             // Both threads must still be ordinary input-desktop threads. The
             // foreground window, PID, owning thread and focus child must match.
-            const auto result=foreground && *foreground==job.foreground && !platform_.stopped() ?
-                platform_.write(job.count,job.data,job.size):Result{0,ERROR_CANCELLED,false};
+            Result result;
+            if(!foreground)result=Result::skipped(reason);
+            else if(*foreground!=job.foreground)result=Result::skipped(Skip::foreground_changed);
+            else if(platform_.stopped())result=Result::skipped(Skip::stopping);
+            else result=platform_.write(job.count,job.data,job.size);
             lock.lock();
             job.result=result;job.done=true;pending_=nullptr;ready_.notify_all();
         }
@@ -57,18 +67,20 @@ public:
         const auto direct=[&] {
             auto result=platform_.write(count,inputs,size);
             if(result.sent==count)inhibited_=false;
+            Skip reason=Skip::unverified;
             if(!armed_ && !thread_.joinable() && !inhibited_ && action.serial && denied(result) &&
-               !platform_.stopped() && platform_.verify(action.target)) {
+               !platform_.stopped() && platform_.verify(action.target,reason)) {
                 failed_serial_=action.serial;armed_=true;platform_.changed(Change::armed,generation_);
             }
             return result;
         };
         if((!armed_ && !thread_.joinable()) || !action.serial || !action.target.window || !action.target.pid ||
            action.serial<=failed_serial_)return direct();
-        if(platform_.stopped())return {0,ERROR_CANCELLED,false};
+        if(platform_.stopped())return Result::skipped(Skip::stopping);
         if(!thread_.joinable() && platform_.now()<next_create_)return direct();
-        const auto foreground=platform_.verify(action.target);
-        if(!foreground)return {0,ERROR_CANCELLED,false};
+        Skip reason=Skip::unverified;
+        const auto foreground=platform_.verify(action.target,reason);
+        if(!foreground)return Result::skipped(reason);
         if(!thread_.joinable()) {
             next_create_=platform_.now()+30000;
             try {thread_=std::thread([this]{run();});}

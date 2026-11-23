@@ -153,7 +153,7 @@ target_compile_options(logi-smooth-events-tests PRIVATE -ffunction-sections -fda
 target_link_options(logi-smooth-events-tests PRIVATE -static -Wl,--gc-sections)
 target_link_libraries(logi-smooth-events-tests PRIVATE user32 shell32 advapi32)
 foreach(case parser default browser main-only main-only-loss reload-enable nonbrowser invert negative packet-resolution malformed thumb thumb-default thumb-volume action preview input-rejected input-recovery input-recovery-direct
-        input-preempt input-stop-pending input-readback input-reload thumb-volume-queue
+        input-preempt input-stop-pending input-readback input-reload thumb-volume-queue clash-browser clash-protected-all reload-scope
         input-generation input-generation-pending input-cancelled-current-owner
         thumb-volume-media thumb-volume-policy firefox-fine-stop
              focus pid stop disconnect reload loss loss-no-neutral health-repair acquire-verify foreign-target zero-capability restore-timeout restore-current-settings)
